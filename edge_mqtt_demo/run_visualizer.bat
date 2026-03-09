@@ -1,0 +1,75 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+REM Always run from this script's directory
+cd /d "%~dp0"
+set "PROJECT_DIR=%CD%"
+
+REM ---- Python interpreter detection ----
+set "PY_EXE="
+if exist "%PROJECT_DIR%\.venv\Scripts\python.exe" (
+    set "PY_EXE=%PROJECT_DIR%\.venv\Scripts\python.exe"
+) else if exist "%PROJECT_DIR%\..\.venv\Scripts\python.exe" (
+    set "PY_EXE=%PROJECT_DIR%\..\.venv\Scripts\python.exe"
+) else (
+    for %%I in (python.exe) do set "PY_EXE=%%~$PATH:I"
+)
+
+if "%PY_EXE%"=="" (
+    echo [ERROR] Python interpreter not found.
+    echo Install Python 3.11+ and/or create a virtual env at:
+    echo   %PROJECT_DIR%\.venv
+    echo or
+    echo   %PROJECT_DIR%\..\.venv
+    pause
+    exit /b 1
+)
+
+echo [INFO] Using Python: %PY_EXE%
+
+REM ---- Start MQTT broker (Mosquitto via Docker Compose) ----
+echo [INFO] Starting Mosquitto broker (docker compose up -d)...
+docker compose up -d
+if errorlevel 1 (
+    echo [WARN] Could not start Docker Compose broker.
+    echo [WARN] If Mosquitto is already running locally on localhost:1883, continuing...
+)
+
+REM Small wait for broker startup
+for /L %%A in (1,1,2) do (
+    >nul ping -n 2 127.0.0.1
+)
+
+echo [INFO] Checking broker reachability on localhost:1883...
+"%PY_EXE%" -c "import socket,sys; s=socket.socket(); s.settimeout(1.5); rc=s.connect_ex(('127.0.0.1',1883)); s.close(); sys.exit(0 if rc==0 else 1)"
+if errorlevel 1 (
+    echo [ERROR] MQTT broker is not reachable on localhost:1883.
+    echo [ERROR] Start Docker Desktop then run this script again,
+    echo [ERROR] or install/start native Mosquitto service on Windows.
+    echo [HINT] Docker route: open Docker Desktop, wait until it says running, then execute:
+    echo [HINT]   docker compose up -d
+    pause
+    exit /b 1
+)
+
+REM ---- Launch visualizer and replayer ----
+echo [INFO] Launching ECG Signal Visualizer...
+start "ECG Visualizer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\visualizer.py""
+
+for /L %%A in (1,1,3) do (
+    >nul ping -n 2 127.0.0.1
+)
+
+echo [INFO] Launching Replayer (synthetic ECG)...
+start "Replayer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\replayer.py" --mode synthetic --fs 250 --chunk-ms 250 --duration-sec 120 --hr-bpm 72"
+
+echo.
+echo [DONE] Started visualizer and replayer.
+echo [INFO] The visualizer will show 3 live plots:
+echo [INFO]   1. Raw ECG (with drift + noise)
+echo [INFO]   2. Filtered ECG (after preprocessing)
+echo [INFO]   3. Filtered + detected R-peaks + HR
+echo.
+echo [INFO] Close windows or press Ctrl+C to stop.
+echo [TIP] To stop broker too, run: docker compose down
+exit /b 0
