@@ -1,6 +1,13 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
+REM ============================================================================
+REM Multi-Sensor Edge Pipeline - Full Demo
+REM ============================================================================
+REM Starts all components: MQTT broker, edge preprocessor, viewer, replayer
+REM Supports: ECG, PPG, SpO2, Temperature, IMU sensors
+REM ============================================================================
+
 REM Always run from this script's directory
 cd /d "%~dp0"
 set "PROJECT_DIR=%CD%"
@@ -53,38 +60,55 @@ if errorlevel 1 (
 )
 
 REM ---- Launch services in order ----
-echo [INFO] Launching Edge Preprocessor...
+echo.
+echo [INFO] Launching Edge Preprocessor (multi-sensor)...
 start "Edge Preprocessor" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\edge_preprocessor.py" --debug"
 
 for /L %%A in (1,1,2) do (
     >nul ping -n 2 127.0.0.1
 )
 
-echo [INFO] Launching Viewer (text)...
-start "Viewer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\viewer.py""
+echo [INFO] Launching Viewer (multi-sensor dashboard with plots)...
+start "Viewer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\viewer.py" --plot"
 
 for /L %%A in (1,1,2) do (
     >nul ping -n 2 127.0.0.1
 )
 
-echo [INFO] Launching Visualizer (live graphs)...
+echo [INFO] Launching Visualizer (ECG waveform plots)...
 start "Visualizer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\visualizer.py""
 
-for /L %%A in (1,1,2) do (
+for /L %%A in (1,1,3) do (
     >nul ping -n 2 127.0.0.1
 )
 
-echo [INFO] Launching Replayer (synthetic ECG)...
-start "Replayer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\replayer.py" --mode synthetic --fs 250 --chunk-ms 250 --duration-sec 120 --hr-bpm 72"
+echo [INFO] Launching Replayer (all sensors: ECG, PPG, SpO2, Temp, IMU)...
+start "Replayer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\replayer.py" --mode synthetic --duration-sec 300 --hr-bpm 72"
 
 echo.
+echo ============================================================================
 echo [DONE] Started all components in separate windows:
-echo [INFO]   - Edge Preprocessor (processes ECG + publishes features)
-echo [INFO]   - Viewer (text output: HR/SQI/notes)
-echo [INFO]   - Visualizer (live graphs: raw/filtered/peaks)
-echo [INFO]   - Replayer (publishes synthetic ECG chunks)
+echo ============================================================================
 echo.
+echo   REPLAYER (Sensor Simulator)
+echo     - Publishes synthetic data for: ECG, PPG, SpO2, Temperature, IMU
+echo     - Topics: sim/patient1/ecg, sim/patient1/ppg, sim/patient1/spo2, etc.
+echo.
+echo   EDGE PREPROCESSOR (Raspberry Pi Simulator)
+echo     - Subscribes to all sensor topics
+echo     - Processes 5-second windows
+echo     - Publishes: edge/patient1/features, edge/patient1/events
+echo.
+echo   VIEWER (Multi-Sensor Dashboard)
+echo     - Shows: ECG HR, PPG HR, SpO2, Temperature, Motion Score
+echo     - Displays events (tachycardia, bradycardia, spo2_drop, etc.)
+echo.
+echo   VISUALIZER (ECG Waveform)
+echo     - Raw vs Filtered ECG signals
+echo     - R-peak detection
+echo.
+echo ============================================================================
 echo [INFO] Close windows or press Ctrl+C in each to stop services.
-
 echo [TIP] To stop broker too, run: docker compose down
+echo ============================================================================
 exit /b 0
