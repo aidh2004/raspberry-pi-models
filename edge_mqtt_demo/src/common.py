@@ -233,13 +233,14 @@ def validate_event_message(payload: Dict[str, Any]) -> Optional[str]:
             return f"missing_key:{key}"
 
     valid_types = {
-        "spo2_drop", "tachycardia", "bradycardia",
+        "spo2_drop", "hypoxemia", "tachycardia", "bradycardia",
+        "fever", "apnea_suspicion",
         "low_quality", "motion_artifact", "sensor_detached"
     }
     if payload["type"] not in valid_types:
         return f"invalid_event_type:{payload['type']}"
 
-    valid_severities = {"low", "moderate", "high"}
+    valid_severities = {"low", "moderate", "high", "critical"}
     if payload["severity"] not in valid_severities:
         return f"invalid_severity:{payload['severity']}"
 
@@ -297,17 +298,30 @@ def safe_imu_triplet_list(values: List[Any]) -> List[Tuple[float, float, float]]
 
 class EventType:
     SPO2_DROP = "spo2_drop"
+    HYPOXEMIA = "hypoxemia"
     TACHYCARDIA = "tachycardia"
     BRADYCARDIA = "bradycardia"
+    FEVER = "fever"
+    APNEA_SUSPICION = "apnea_suspicion"
     LOW_QUALITY = "low_quality"
     MOTION_ARTIFACT = "motion_artifact"
     SENSOR_DETACHED = "sensor_detached"
 
 
 class Severity:
-    LOW = "low"
-    MODERATE = "moderate"
-    HIGH = "high"
+    LOW = "low"          # VERT  — surveillance standard
+    MODERATE = "moderate"  # JAUNE — vérification demandée
+    HIGH = "high"        # ORANGE — intervention recommandée
+    CRITICAL = "critical"  # ROUGE — alerte immédiate
+
+
+# Alert color mapping (PDF Table 6)
+SEVERITY_COLOR = {
+    Severity.LOW: "green",
+    Severity.MODERATE: "yellow",
+    Severity.HIGH: "orange",
+    Severity.CRITICAL: "red",
+}
 
 
 def create_event(
@@ -335,16 +349,63 @@ def create_features(
     ppg: Optional[Dict[str, Any]] = None,
     spo2: Optional[Dict[str, Any]] = None,
     temp_c: Optional[Dict[str, Any]] = None,
-    motion: Optional[Dict[str, Any]] = None
+    motion: Optional[Dict[str, Any]] = None,
+    respiration: Optional[Dict[str, Any]] = None,
+    ml: Optional[Dict[str, Any]] = None,
+    rules: Optional[Dict[str, Any]] = None,
+    decision: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Create a properly formatted features message."""
+    """Create a properly formatted features message (PDF-compliant)."""
     return {
         "patient_id": patient_id,
         "window_start_ms": window_start_ms,
         "window_sec": window_sec,
-        "ecg": ecg or {"hr_bpm": None, "sqi": 0.0, "notes": ["no_data"]},
-        "ppg": ppg or {"hr_bpm": None, "sqi": 0.0, "notes": ["no_data"]},
-        "spo2": spo2 or {"mean": None, "min": None, "drops": 0},
-        "temp_c": temp_c or {"mean": None},
-        "motion": motion or {"score": 0.0, "notes": ["no_data"]}
+        # --- ECG features (ADS1292R) ---
+        "ecg": ecg or {
+            "hr_mean": None, "hr_min": None, "hr_max": None,
+            "rr_mean_ms": None,
+            "hrv_sdnn": None, "hrv_rmssd": None,
+            "qrs_duration_ms": None,
+            "abnormal_beats": 0,
+            "sqi": 0.0, "notes": ["no_data"],
+        },
+        # --- PPG features (MAX86141) ---
+        "ppg": ppg or {
+            "pulse_rate": None, "amplitude": None,
+            "ptt_ms": None,
+            "sqi": 0.0, "notes": ["no_data"],
+        },
+        # --- SpO2 features (MAX86141) ---
+        "spo2": spo2 or {
+            "mean": None, "min": None,
+            "desaturation_count": 0, "desat_index_per_hr": None,
+        },
+        # --- Temperature features (TMP117) ---
+        "temp_c": temp_c or {
+            "mean": None, "variation": None, "fever": False,
+        },
+        # --- Movement features (ICM-42688) ---
+        "motion": motion or {
+            "mvt_count": 0, "immobility_sec": 0.0,
+            "agitation_index": 0.0, "score": 0.0,
+            "notes": ["no_data"],
+        },
+        # --- Respiration features (derived) ---
+        "respiration": respiration or {
+            "rate_bpm": None, "amplitude": None,
+        },
+        # --- Clinical rules result ---
+        "rules": rules or {"triggered": [], "severity": Severity.LOW},
+        # --- ML inference result ---
+        "ml": ml or {
+            "risk_score": None,
+            "deterioration_prob": None,
+            "event_class": "normal",
+        },
+        # --- Final decision ---
+        "decision": decision or {
+            "severity": Severity.LOW,
+            "color": "green",
+            "action": "surveillance_standard",
+        },
     }

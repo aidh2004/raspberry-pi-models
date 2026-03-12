@@ -1,905 +1,924 @@
-# edge_mqtt_demo — Complete Technical Documentation
+# Edge AI Gateway — Technical Documentation
+
+> Smart Medical Mat: Edge Intelligence for Continuous Patient Monitoring
+>
+> This document covers the complete AI pipeline — from raw sensor signals to clinical
+> decisions — designed to serve as the reference for the AI chapter of the project report.
+
+---
 
 ## Table of Contents
-1. [Project Overview](#project-overview)
-2. [Architecture & System Design](#architecture--system-design)
-3. [Technology Stack](#technology-stack)
-4. [Step-by-Step Data Flow](#step-by-step-data-flow)
-5. [Code Deep Dive](#code-deep-dive)
-6. [Processing Pipeline Explained](#processing-pipeline-explained)
-7. [Testing & Validation](#testing--validation)
-8. [Future Hardware Integration](#future-hardware-integration)
+
+1. [Introduction & Objectives](#1-introduction--objectives)
+2. [System Architecture](#2-system-architecture)
+3. [Development Phases](#3-development-phases)
+4. [Technology Stack](#4-technology-stack)
+5. [Communication Layer — MQTT Protocol](#5-communication-layer--mqtt-protocol)
+6. [Data Acquisition — Sensor Simulation](#6-data-acquisition--sensor-simulation)
+7. [Edge AI Pipeline — 6-Step Processing](#7-edge-ai-pipeline--6-step-processing)
+   - 7.1 [Signal Preprocessing & Feature Extraction](#71-signal-preprocessing--feature-extraction)
+   - 7.2 [Clinical Rules Engine](#72-clinical-rules-engine)
+   - 7.3 [Machine Learning Inference](#73-machine-learning-inference)
+   - 7.4 [Decision Fusion Engine](#74-decision-fusion-engine)
+   - 7.5 [Publishing & Alerting](#75-publishing--alerting)
+8. [Real-Time Visualization Dashboard](#8-real-time-visualization-dashboard)
+9. [Data Logging (CSV)](#9-data-logging-csv)
+10. [Testing & Validation Results](#10-testing--validation-results)
+11. [Data Flow — Complete Example](#11-data-flow--complete-example)
+12. [Project Files & Module Map](#12-project-files--module-map)
+13. [Deployment — From Simulation to Real Hardware](#13-deployment--from-simulation-to-real-hardware)
 
 ---
 
-## Project Overview
+## 1. Introduction & Objectives
 
-### What is this?
-A **hardware-free digital twin** of a smart medical mat system. It simulates:
-- **ESP32 sensor node** (publishes ECG data) → **Replayer service**
-- **Raspberry Pi edge gateway** (preprocesses + extracts features) → **Edge Preprocessor service**
-- **Cloud server/dashboard** (logs results) → **Viewer service**
+### 1.1 What is this project?
 
-### Why build it?
-Before you have physical hardware (ESP32 + Raspberry Pi + ECG sensors), you need to:
-- ✅ Validate the data pipeline (preprocessing, feature extraction, windowing).
-- ✅ Test MQTT communication contracts (message format, topics, timing).
-- ✅ Ensure all code compiles and runs end-to-end locally.
-- ✅ Verify robustness (gap handling, out-of-order packets, buffering).
+This project implements a **complete Edge AI Gateway** for a smart medical mat system. It
+processes multi-sensor biomedical data in real time, extracts clinical features, applies
+medical rules, runs machine learning inference, and produces severity-graded clinical
+decisions — all at the edge (Raspberry Pi), without requiring cloud connectivity.
 
-When real hardware arrives, integration is just: swap the publisher and move the edge service to Raspberry Pi.
+### 1.2 Project goals
 
-### Design Philosophy
-**"Plug-compatible from day one"**
-- Fixed MQTT topics (`sim/patient1/ecg`, `edge/patient1/features`).
-- Fixed JSON schemas (no surprises when hardware arrives).
-- Services are **stateless** (can restart without data loss).
-- Timestamps and windowing mimic real-time constraints.
+| Goal | Description |
+|------|-------------|
+| **Validate the AI pipeline** | Prove that feature extraction, clinical rules, ML models, and decision fusion work correctly end-to-end |
+| **Simulate before hardware** | Build a hardware-free digital twin that runs entirely on a development PC |
+| **Plug-compatible design** | Fixed MQTT topics and JSON schemas — when real sensors arrive, only the data source changes |
+| **Edge-first architecture** | All AI processing runs locally on constrained hardware (Raspberry Pi), no cloud dependency |
+| **Clinical-grade output** | Produce severity levels (LOW → CRITICAL) with color-coded actions for medical staff |
 
----
+### 1.3 Key results achieved
 
-## Architecture & System Design
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                   YOUR LAPTOP (Simulation)                     │
-│                                                                │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────┐ │
-│  │  Replayer.py     │  │ Edge Preprocessor│  │  Viewer.py  │ │
-│  │  (ESP32 twin)    │  │  .py (Raspi twin)│  │(Dashboard)  │ │
-│  │                  │  │                  │  │             │ │
-│  │ Publishes:       │  │ Subscribes:      │  │ Subscribes: │ │
-│  │ sim/patient1/ecg │  │ sim/patient1/ecg │  │ edge/...    │ │
-│  └────────┬─────────┘  └────────┬─────────┘  │ features    │ │
-│           │                     │            └─────────────┘ │
-│           │     JSON chunks     │                   ▲         │
-│           │   (250ms windows)   │                   │         │
-│           └─────────────┬───────┘                   │         │
-│                         │                          │         │
-│                    ┌────▼──────────────────────────┤         │
-│                    │                               │         │
-│                    │  MQTT Broker                  │         │
-│                    │  (Mosquitto via Docker)       │         │
-│                    │  localhost:1883               │         │
-│                    │                               │         │
-│                    └───────────────┬────────────────┘         │
-│                                    │                          │
-│                            JSON features                      │
-│                            (every 5 sec)                      │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
-```
-
-### Services Overview
-
-| Service | Role | Input | Output | Tech |
-|---------|------|-------|--------|------|
-| **Replayer** | Publishes ECG chunks | Synthetic OR file | MQTT topic `sim/patient1/ecg` | NumPy, synthetic signal generation |
-| **Edge Preprocessor** | Filters, detects R-peaks, extracts HR | MQTT topic `sim/patient1/ecg` | MQTT topic `edge/patient1/features` | SciPy (filtering), NumPy (math) |
-| **Viewer** | Logs + plots results | MQTT topic `edge/patient1/features` | Console + optional plot | Matplotlib |
+- **18 signal-processing formulas** implemented (ECG, PPG, SpO2, Temperature, IMU, Respiration)
+- **7 clinical rules** based on medical thresholds
+- **3 machine learning models** trained and validated (Logistic Regression, Random Forest, XGBoost)
+- **Decision fusion engine** combining rules + ML with priority logic
+- **Single-window real-time dashboard** with 3 navigable pages
+- **CSV data logging** (33 columns per 5-second window)
+- **6 clinical scenarios** tested and validated
 
 ---
 
-## Technology Stack
+## 2. System Architecture
 
-### 1. **MQTT (Message Queuing Telemetry Transport)**
-**What it is:**
-- Lightweight pub/sub protocol for IoT devices.
-- Publish data to named topics; others subscribe to receive it.
-- Decouples producers from consumers (services don't need to know each other's IP).
+### 2.1 Overall architecture diagram
 
-**Why we use it:**
-- ✅ Works with ESP32 (single-thread friendly).
-- ✅ Works with Raspberry Pi (low overhead, battery-friendly).
-- ✅ Works on local network and over internet (LTE, WiFi).
-- ✅ Preserves message order + supports QoS (reliability).
-
-**In this project:**
 ```
-Replayer → publishes → sim/patient1/ecg (input topic)
-Edge Preprocessor → subscribes → sim/patient1/ecg
-                 → publishes → edge/patient1/features (output topic)
-Viewer → subscribes → edge/patient1/features
-```
-
-### 2. **Mosquitto**
-**What it is:**
-- Open-source MQTT broker (the server that routes messages).
-- Runs on port `1883` (default unencrypted).
-
-**Why we use it:**
-- ✅ Lightweight (runs in Docker container ~10MB).
-- ✅ Free and widely used in IoT (same one you'd run on Raspberry Pi).
-- ✅ Supports QoS (guaranteed message delivery if needed).
-
-**In this project:**
-- Runs in Docker Desktop container.
-- Listens on `localhost:1883`.
-- When Replayer publishes to `sim/patient1/ecg`, Mosquitto routes it to all subscribers.
-
-### 3. **Python 3.11+**
-**Why we use it:**
-- ✅ Fast to iterate (perfect for ML/signal processing).
-- ✅ Strong NumPy/SciPy ecosystem (filtering, peak detection).
-- ✅ Paho-MQTT library (reliable Python MQTT client).
-- ✅ Same language runs on ESP32 (MicroPython) and Raspberry Pi (CPython).
-
-### 4. **NumPy**
-**What it does:**
-- Fast numerical arrays and math operations.
-
-**In this project:**
-- Holds ECG samples as arrays.
-- Performs filtering, detrending, peak detection on arrays.
-- Calculates HR statistics (mean, std, etc.).
-
-**Example:**
-```python
-samples = np.array([0.01, 0.02, -0.01, 0.005, ...])  # ECG chunk
-mean = np.mean(samples)  # Baseline
-filtered = samples - mean  # Detrend
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          DEVELOPMENT PC (Simulation)                         │
+│                                                                              │
+│  ┌──────────────┐                                      ┌──────────────────┐ │
+│  │  replayer.py  │    sim/patient1/{ecg,ppg,spo2,      │  visualizer.py   │ │
+│  │  (ESP32 sim.) │    temp,imu}                        │  (Dashboard)     │ │
+│  │               │─────────┐                           │                  │ │
+│  │  Publishes:   │         │                           │  3 pages:        │ │
+│  │  - ECG 250 Hz │         ▼                           │  1. Raw Inputs   │ │
+│  │  - PPG 100 Hz │   ┌───────────┐  edge/patient1/    │  2. Processed    │ │
+│  │  - IMU  50 Hz │   │ Mosquitto │  features + events  │  3. AI Features  │ │
+│  │  - SpO2  1 Hz │   │  Broker   │────────────────────▶│                  │ │
+│  │  - Temp 0.2Hz │   │ :1883     │                     └──────────────────┘ │
+│  └──────────────┘   └─────┬─────┘                                           │
+│                           │ sim/patient1/*                                   │
+│                           ▼                                                  │
+│              ┌─────────────────────────────────────┐                        │
+│              │    Edge Preprocessor (Raspi sim.)    │                        │
+│              │                                     │                        │
+│              │  Step 1. Feature Extraction (18)     │                        │
+│              │  Step 2. Clinical Rules (7)          │                        │
+│              │  Step 3. ML Inference (3 models)     │                        │
+│              │  Step 4. Decision Fusion             │                        │
+│              │  Step 5. MQTT Publish                │                        │
+│              │  Step 6. Local Alert + CSV Log       │                        │
+│              │                                     │                        │
+│              │  Models:                            │                        │
+│              │  ├── logistic_regression.joblib      │                        │
+│              │  ├── random_forest.joblib            │                        │
+│              │  └── xgboost.joblib                  │                        │
+│              └─────────────────────────────────────┘                        │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5. **SciPy**
-**What it does:**
-- Advanced signal processing (filtering, peak finding).
+### 2.2 Component roles
 
-**In this project:**
-- **Detrend**: remove slow baseline drift.
-- **Butterworth filter**: bandpass 0.5–40 Hz (remove powerline + noise).
-- **Notch filter**: remove 50 Hz powerline interference.
-- **find_peaks**: detect R-peaks in filtered ECG.
+| Component | Simulates | Role | Key Technologies |
+|-----------|-----------|------|-----------------|
+| **replayer.py** | ESP32 sensor node | Generates & publishes synthetic multi-sensor data via MQTT | NumPy, paho-mqtt |
+| **edge_preprocessor.py** | Raspberry Pi Gateway | Full 6-step AI pipeline: extract → rules → ML → decide → publish → log | SciPy, scikit-learn, XGBoost |
+| **visualizer.py** | Cloud dashboard | Single-window real-time display with 3 switchable pages | Matplotlib, paho-mqtt |
+| **Mosquitto broker** | Network infrastructure | Routes MQTT messages between all components | Eclipse Mosquitto (Docker) |
 
-**Example:**
-```python
-from scipy.signal import butter, filtfilt
-b, a = butter(3, [0.5, 40], fs=250, btype='band')
-filtered = filtfilt(b, a, ecg_samples)  # Zero-phase bandpass
-```
+### 2.3 Design principles
 
-### 6. **Paho-MQTT**
-**What it is:**
-- Python MQTT client library.
-
-**In this project:**
-- Each service creates an `mqtt.Client()` instance.
-- Callbacks (`on_connect`, `on_message`, `on_disconnect`) handle events.
-- Services auto-reconnect on failure (with exponential backoff).
-
-**Example:**
-```python
-client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-client.on_connect = on_connect  # Callback when connected
-client.connect('localhost', 1883, keepalive=30)
-client.loop_start()  # Background thread for pub/sub
-```
-
-### 7. **Docker**
-**What it is:**
-- Containerization: runs Mosquitto in an isolated, pre-configured environment.
-
-**In this project:**
-- `docker-compose.yml` defines Mosquitto container.
-- Simplifies setup (no native Mosquitto install needed).
-- Same container can deploy to production Raspberry Pi.
-
-### 8. **Matplotlib** (optional)
-**What it does:**
-- Real-time plotting of HR trend.
-
-**In this project:**
-- Viewer can plot HR over time with `--plot` flag.
-- Shows quality/trends immediately (useful for debugging).
+1. **Plug-compatible**: Fixed MQTT topics and JSON schemas from day one — swap the data source and the pipeline works unchanged.
+2. **Stateless services**: Each component can restart independently without data loss.
+3. **Portable models**: ML models saved as `.joblib` files — train on laptop, deploy on Raspberry Pi.
+4. **Edge-first**: No internet required; all processing happens locally.
 
 ---
 
-## Step-by-Step Data Flow
+## 3. Development Phases
 
-### Timeline: What happens when you run `.\run_all.bat`
+This section describes the phases followed to build the complete AI pipeline, useful for
+structuring the project report.
 
-```
-T=0s:    run_all.bat starts
-         ├─ Checks Python path
-         ├─ Starts Docker Compose (Mosquitto)
-         └─ Verifies broker on localhost:1883
+### Phase 1 — Communication Infrastructure
 
-T=2s:    Launches 3 terminal windows:
-         ├─ Edge Preprocessor (waits for messages)
-         ├─ Viewer (waits for messages)
-         └─ Replayer (starts publishing)
+**Objective**: Establish the MQTT messaging backbone.
 
-T=3s:    Replayer connects to MQTT, starts ECG generation
-         └─ Generates 250Hz synthetic signal for 30 minutes
+- Set up Eclipse Mosquitto broker via Docker (`docker-compose.yml`)
+- Defined MQTT topic hierarchy: `sim/{patient_id}/{sensor}` for raw data, `edge/{patient_id}/{features|events}` for processed output
+- Defined JSON message schemas for each sensor type (chunk messages for high-rate sensors, sample messages for low-rate sensors)
+- Implemented shared configuration module (`common.py`) with enums, validation functions, and MQTT settings
 
-T=3.25s: Replayer publishes 1st chunk
-         ├─ JSON: {"patient_id": "patient1", "t0_ms": 12345, "fs_hz": 250, "samples": [0.01, 0.02, ...]}
-         └─ Topic: sim/patient1/ecg
+### Phase 2 — Sensor Simulation (Data Acquisition Layer)
 
-T=3.25s: Mosquitto routes message to subscribers
-         ├─ Edge Preprocessor receives it
-         └─ Buffers the samples (appends to stream state)
+**Objective**: Generate realistic multi-sensor biomedical data.
 
-T=3.5s:  Replayer publishes 2nd chunk (another 62 samples at t0=12345+250)
-         └─ Edge Preprocessor buffers it
+- Built `replayer.py` as ESP32 digital twin
+- Implemented synthetic signal generation for 5 sensor types:
+  - **ECG** (250 Hz): P-QRS-T morphology with baseline wander, 50 Hz powerline interference, and Gaussian noise
+  - **PPG** (100 Hz): Systolic peak + dicrotic notch with baseline variation
+  - **IMU** (50 Hz): 3-axis accelerometer with gravity vector and optional motion bursts
+  - **SpO2** (1 Hz): Oxygen saturation with optional desaturation events
+  - **Temperature** (0.2 Hz): Random walk around 37°C baseline
+- Added robustness testing features: gap injection, out-of-order packets, speed control
 
-T=3.75s: Replayer publishes 3rd chunk
-         └─ Edge Preprocessor now has 3 * 62 = 186 samples
+### Phase 3 — Signal Processing & Feature Extraction
 
-T=4s:    Replayer publishes 4th chunk
-         └─ Edge Preprocessor now has 250 samples = 1 second of data
+**Objective**: Extract clinically meaningful features from raw signals.
 
-T=4.5s:  Replayer publishes 5th chunk → 312 samples
+- Implemented `feature_extraction.py` with **18 signal-processing formulas**
+- ECG processing chain: detrend → Butterworth bandpass (0.5–40 Hz) → 50 Hz notch filter → R-peak detection → HR/HRV/QRS computation
+- PPG processing: bandpass (0.5–8 Hz) → peak detection → pulse rate + PTT
+- SpO2/Temperature/IMU: statistical features + clinical thresholds
+- Respiration rate derived from ECG envelope modulation via FFT
+- Implemented signal quality index (SQI) for both ECG and PPG
 
-T=5.25s: Replayer publishes 6th chunk → 374 samples
+### Phase 4 — Clinical Rules Engine
 
-T=6s:    Replayer publishes 7th chunk → 1262 samples (5 seconds!)
-         ├─ Edge Preprocessor now has enough for first window
-         ├─ Extracts window[0:1250] (5 sec at 250Hz)
-         ├─ Preprocesses: detrend + bandpass + notch
-         ├─ Detects R-peaks
-         ├─ Calculates HR from RR intervals
-         ├─ Computes SQI
-         └─ Publishes to edge/patient1/features
+**Objective**: Apply medical knowledge as deterministic threshold rules.
 
-T=6s:    Mosquitto routes to Viewer
-         ├─ Viewer receives: {"patient_id": "patient1", "window_start_ms": 12345, "hr_bpm": 72.4, "sqi": 0.91, "notes": []}
-         └─ Prints to console: [viewer] patient=patient1 ... hr=72.4 sqi=0.91
+- Implemented `clinical_rules.py` with **7 clinical rules** based on medical standards
+- Rules cover: hypoxemia, tachycardia, bradycardia, fever, apnea suspicion, signal quality, motion artifacts
+- Each rule produces a severity level (LOW → CRITICAL) and event details
+- All rules evaluate independently (no short-circuit) — multiple alarms can fire simultaneously
 
-T=6.25s: Replayer publishes 8th chunk
-         └─ Edge Preprocessor slides window forward by 1250 samples (5 sec)
-            and waits for next 1250 samples
+### Phase 5 — Machine Learning Models
 
-T=11.25s: 2nd window published to edge/patient1/features
-         └─ Viewer prints 2nd HR value
+**Objective**: Add predictive intelligence beyond fixed thresholds.
 
-... repeats every 5 seconds ...
+- Implemented `ml_inference.py` with **3 complementary ML models**:
+  - **Logistic Regression** → binary risk score (0–1)
+  - **Random Forest** (50 trees) → 6-class event classification
+  - **XGBoost** (50 trees) → deterioration probability (0–1)
+- Built a **19-feature vector** from all sensor domains
+- Generated **2000 synthetic training samples** across 6 clinical scenarios
+- Models auto-train on first run and save as `.joblib` files
+- Training accuracies: LR = 94.6%, RF = 97.8%, XGB = 96.4%
 
-T=30m:   Replayer finishes (duration-sec=1800 by default)
-         └─ All services continue running (can Ctrl+C to stop)
-```
+### Phase 6 — Decision Fusion
 
-### Key insight: **Windowing**
-- Edge Preprocessor buffers incoming chunks.
-- Once buffer ≥ 5 seconds of data, it extracts a window.
-- Publishes window results.
-- Slides buffer forward by 5 seconds (non-overlapping).
+**Objective**: Combine rules and ML into a single clinical decision.
 
----
+- Implemented `decision_engine.py` with priority-based fusion logic
+- Rules severity serves as baseline; ML can only **escalate**, never downgrade
+- Output: severity level + color code + recommended action
+- Mapping: LOW/Green → routine | MODERATE/Yellow → verify | HIGH/Orange → intervene | CRITICAL/Red → immediate alert
 
-## Code Deep Dive
+### Phase 7 — Integration & Data Pipeline
 
-### 1. **common.py** — Shared Utilities
+**Objective**: Wire all AI modules into the edge gateway.
 
-```python
-# Message validation
-def validate_input_message(payload: Dict[str, Any]) -> Optional[str]:
-    """Check if received JSON has required fields + correct types."""
-    required = ["patient_id", "t0_ms", "fs_hz", "samples"]
-    for key in required:
-        if key not in payload:
-            return f"missing_key:{key}"
-    # ... more checks ...
-    return None
+- `edge_preprocessor.py` orchestrates the complete 6-step pipeline
+- Buffering system handles multi-rate sensor data (5-second non-overlapping windows)
+- CSV logging captures all 33 feature columns per window for offline analysis
+- Results published via MQTT and printed to console with color-coded severity
 
-# MQTT config
-class MqttConfig:
-    host: str = "localhost"
-    port: int = 1883
-    keepalive: int = 30
+### Phase 8 — Visualization & Optimization
 
-# Helper to convert Python dict → JSON string
-def to_json(payload: Dict[str, Any]) -> str:
-    return json.dumps(payload, separators=(",", ":"))
-```
+**Objective**: Build a real-time monitoring dashboard.
 
-**Why this matters:**
-- Validates contracts before processing (fails fast).
-- Centralizes config (change port once, all services use it).
-- Reusable across all three services.
+- Implemented `visualizer.py` as a **single-window dashboard with 3 switchable pages**
+- Optimized for low resource usage: only the active page redraws each tick (600 ms interval)
+- Single MQTT connection instead of multiple, minimal GPU/memory footprint
+- Page navigation via clickable buttons at the bottom of the window
 
 ---
 
-### 2. **replayer.py** — ESP32 Simulator
+## 4. Technology Stack
 
-#### High-level flow:
-```python
-def main():
-    1. Parse command-line args (--mode, --fs, --chunk-ms, --hr-bpm, etc.)
-    2. Load or generate ECG signal
-    3. Connect to MQTT broker
-    4. Loop through signal in chunks, publish every chunk_ms
-```
+### 4.1 Dependencies
 
-#### Synthetic signal generation:
-```python
-def generate_synthetic_ecg(duration_sec, fs_hz, hr_bpm, noise_std):
-    """
-    Creates realistic ECG with P, QRS, T waves at specified HR.
-    """
-    t = np.arange(n) / fs_hz
-    
-    # Beat times (e.g., every 60/72 = 0.833 seconds for 72 bpm)
-    rr_sec = 60.0 / hr_bpm
-    beat_times = np.arange(0.4, duration_sec, rr_sec)
-    
-    # Add P, Q, R, S, T waves using Gaussians
-    signal += 1.2 * exp(-(t - R_time)^2 / 0.015^2)  # R peak
-    signal += -0.15 * exp(-(t - Q_time)^2 / 0.01^2)  # Q wave
-    # ... P, S, T similar ...
-    
-    # Add drift, powerline, noise
-    baseline = 0.1 * sin(2π * 0.2 * t)  # Slow drift
-    powerline = 0.02 * sin(2π * 50 * t)  # 50 Hz interference
-    noise = randn() * noise_std
-    
-    return signal + baseline + powerline + noise
-```
+| Library | Version | Role in the project |
+|---------|---------|-------------------|
+| **Python** | 3.11+ | Core language — runs identically on laptop and Raspberry Pi |
+| **NumPy** | ≥ 1.24 | Numerical arrays for signal buffers, feature computation (mean, std, FFT) |
+| **SciPy** | ≥ 1.10 | Signal processing: Butterworth filters, notch filter, peak detection, detrend |
+| **scikit-learn** | ≥ 1.3 | ML models: Logistic Regression, Random Forest, label encoding, train/test split |
+| **XGBoost** | ≥ 2.0 | Gradient-boosted trees for deterioration prediction |
+| **joblib** | ≥ 1.3 | Model serialization (`.joblib` files) — portable across platforms |
+| **paho-mqtt** | ≥ 1.6.1 | MQTT client with auto-reconnect, QoS=1, publish/subscribe callbacks |
+| **Matplotlib** | ≥ 3.7 | Real-time dashboard with `FuncAnimation`, `GridSpec`, `Button` widgets |
+| **Mosquitto** | 2.x | MQTT broker — runs via Docker (dev) or native install (production) |
+| **Docker** | — | Container for Mosquitto broker during development (one-command setup) |
 
-**Why realistic?**
-- Tests preprocessing filters (must remove drift/powerline).
-- Tests peak detector (handles physiological P, QRS, T waves).
-- Tests SQI (noise affects quality score).
+### 4.2 Why these choices?
 
-#### Publishing loop:
-```python
-while index < len(ecg):
-    chunk = ecg[index : index + samples_per_chunk]
-    
-    # Calculate timestamp
-    t0_ms = stream_t0_ms + chunk_duration_ms(index, fs_hz)
-    
-    # Create JSON
-    payload = {
-        "patient_id": "patient1",
-        "t0_ms": t0_ms,
-        "fs_hz": fs_hz,
-        "samples": chunk.tolist()
-    }
-    
-    # Publish to MQTT
-    client.publish("sim/patient1/ecg", json.dumps(payload), qos=1)
-    
-    # Real-time pacing (sleep to match chunk duration)
-    elapsed = (len(chunk) / fs_hz) / speed_factor
-    time.sleep(elapsed)
-    
-    index += len(chunk)
-```
-
-**Key features:**
-- ✅ **Real-time pacing**: sleeps between chunks to simulate live streaming.
-- ✅ **Chunk timestamps**: `t0_ms` marks start time (enables sync with multiple sensors later).
-- ✅ **QoS=1**: broker guarantees delivery (at least once).
-- ✅ **Speed control**: `--speed 2.0` publishes twice faster (useful for rapid testing).
-
-#### Optional: Inject gaps/out-of-order chunks
-```python
-if args.inject_gap_every > 0 and chunk_idx % args.inject_gap_every == 0:
-    t0_ms += args.chunk_ms * 2  # Skip one chunk's worth of time
-    # Edge will detect gap and fill with zeros
-
-if args.inject_oop_every > 0 and chunk_idx > 0 and chunk_idx % args.inject_oop_every == 0:
-    t0_ms -= args.chunk_ms  # Send chunk out of order
-    # Edge will detect and handle overlap
-```
-
-**Why test gaps/out-of-order?**
-- Real hardware can disconnect, retransmit, or jitter.
-- Edge must be robust (can't crash on imperfect transport).
+- **SciPy** was chosen over custom filters because it provides clinically validated Butterworth and IIR filter implementations, critical for biomedical signal processing.
+- **scikit-learn + XGBoost** provide a range of model complexity (linear → ensemble → boosted) suitable for an edge device with limited RAM.
+- **MQTT** is the standard IoT messaging protocol — lightweight, supports publish/subscribe, works on constrained networks, and is the default for medical IoT.
+- **Docker** is used only for the MQTT broker during development — it provides instant, reproducible setup with `docker-compose up -d`. In production on Raspberry Pi, Mosquitto is installed natively (`sudo apt install mosquitto`).
 
 ---
 
-### 3. **edge_preprocessor.py** — Raspberry Pi Simulator
+## 5. Communication Layer — MQTT Protocol
 
-#### High-level flow:
-```python
-def main():
-    1. Connect to MQTT broker
-    2. Subscribe to sim/patient1/ecg
-    3. On each message:
-        a. Validate input JSON
-        b. Add chunk to stream buffer
-        c. If buffer ≥ 5 sec, extract + process window
-        d. Publish features to edge/patient1/features
+### 5.1 What is MQTT?
+
+MQTT (Message Queuing Telemetry Transport) is a lightweight publish/subscribe messaging 
+protocol designed for IoT devices. It uses a central **broker** to route messages between
+**publishers** (sensors) and **subscribers** (processors, dashboards).
+
+### 5.2 Why MQTT for this project?
+
+| Advantage | Explanation |
+|-----------|-------------|
+| **Lightweight** | Minimal overhead — runs on ESP32 (2 KB RAM for client) and Raspberry Pi |
+| **Publish/Subscribe** | Decouples producers from consumers — add or remove components without changing others |
+| **Topic-based routing** | Hierarchical topics (`sim/patient1/ecg`) provide clean message organization |
+| **QoS levels** | Guarantees message delivery (QoS=1 used in this project) |
+| **Standard protocol** | Supported by all IoT platforms (AWS IoT, Azure, HiveMQ, Mosquitto) |
+
+### 5.3 Broker setup
+
+The MQTT broker (Eclipse Mosquitto) runs via Docker during development:
+
+```yaml
+# docker-compose.yml
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: edge-mqtt-demo-broker
+    ports:
+      - "1883:1883"    # MQTT protocol
+      - "9001:9001"    # WebSocket (optional)
+    restart: unless-stopped
 ```
 
-#### Stream buffering & windowing:
-```python
-class StreamState:
-    fs_hz: int  # Sampling rate
-    buffer_start_ms: int  # Timestamp of first sample in buffer
-    buffer: np.ndarray  # Accumulating ECG samples
-    
-    @property
-    def buffer_end_ms(self) -> int:
-        """Timestamp of last sample in buffer."""
-        return buffer_start_ms + chunk_duration_ms(len(buffer), fs_hz)
+**Start**: `docker-compose up -d`
+**Stop**: `docker-compose down`
 
-# In message handler:
-state = stream_states.get(patient_id)
+### 5.4 Topic hierarchy
 
-# Handle gap (missing samples)
-if t0_ms > state.buffer_end_ms:
-    gap_ms = t0_ms - state.buffer_end_ms
-    gap_samples = int(gap_ms * fs_hz / 1000)
-    state.buffer = np.concatenate([state.buffer, np.zeros(gap_samples)])
-    notes.append("gap_filled_zeros")
+```
+sim/{patient_id}/ecg       ← Raw ECG chunks (250 Hz)
+sim/{patient_id}/ppg       ← Raw PPG chunks (100 Hz)
+sim/{patient_id}/imu       ← Raw IMU triplets (50 Hz)
+sim/{patient_id}/spo2      ← SpO2 samples (1 Hz)
+sim/{patient_id}/temp      ← Temperature samples (0.2 Hz)
 
-# Handle overlap (out-of-order chunk)
-elif t0_ms < state.buffer_end_ms:
-    overlap_ms = state.buffer_end_ms - t0_ms
-    overlap_samples = int(overlap_ms * fs_hz / 1000)
-    state.buffer = np.concatenate([state.buffer, samples[overlap_samples:]])
-    notes.append("overlap_trimmed")
-
-# Normal case (sequential)
-else:
-    state.buffer = np.concatenate([state.buffer, samples])
-
-# Extract windows when enough data
-window_samples = int(args.window_sec * fs_hz)  # 1250 for 5s @ 250Hz
-while len(state.buffer) >= window_samples:
-    window = state.buffer[:window_samples]
-    hr_bpm, sqi, notes = process_window(window, fs_hz, notch_hz)
-    
-    # Publish
-    output = {
-        "patient_id": patient_id,
-        "window_start_ms": state.buffer_start_ms,
-        "window_sec": 5,
-        "hr_bpm": hr_bpm,
-        "sqi": sqi,
-        "notes": notes
-    }
-    client.publish("edge/patient1/features", json.dumps(output))
-    
-    # Slide window
-    state.buffer = state.buffer[window_samples:]
-    state.buffer_start_ms += chunk_duration_ms(window_samples, fs_hz)
+edge/{patient_id}/features ← Processed features (every 5 seconds)
+edge/{patient_id}/events   ← Clinical events (on trigger)
 ```
 
-**Key robustness features:**
-- ✅ **Gap handling**: fills with zeros, tags with note.
-- ✅ **Out-of-order handling**: trims overlap, continues.
-- ✅ **Per-patient buffering**: multiple patients simultaneously (future-proof).
-- ✅ **Timestamp tracking**: knows exact start time of each window.
+### 5.5 Message formats
 
----
-
-### 4. **Preprocessing Pipeline** — In `preprocess_ecg()`
-
-```python
-def preprocess_ecg(window, fs_hz, notch_hz):
-    x = window.astype(float)
-    
-    # Step 1: Detrend (remove slow drift)
-    x = detrend(x, type='linear')
-    # Removes polynomial baseline (e.g., slow DC shift from electrode motion)
-    
-    # Step 2: Bandpass filter (0.5–40 Hz)
-    nyq = fs_hz / 2.0  # Nyquist frequency (125 Hz for 250 Hz sampling)
-    low = 0.5 / nyq
-    high = 40.0 / nyq
-    b, a = butter(3, [low, high], btype='band')  # 3rd order Butterworth
-    x = filtfilt(b, a, x)
-    # Removes DC (< 0.5 Hz), muscle noise (> 40 Hz), powerline (50 Hz)
-    
-    # Step 3: Notch filter (50 Hz)
-    if notch_hz is not None:
-        b_n, a_n = iirnotch(w0=notch_hz/nyq, Q=30)
-        x = filtfilt(b_n, a_n, x)
-    # Removes remaining 50 Hz powerline
-    
-    return x
-```
-
-**Why each step?**
-- **Detrend**: ECG drifts due to electrode motion; linear detrend removes low-freq trends.
-- **Bandpass**: ECG info is 0.5–40 Hz; filters out noise outside this range.
-- **Notch**: AC powerline (50 Hz in EU, 60 Hz in US) appears as noise; notch removes it precisely.
-
----
-
-### 5. **R-peak Detection** — In `detect_r_peaks()`
-
-```python
-def detect_r_peaks(filtered, fs_hz):
-    """
-    Finds local maxima in filtered ECG that correspond to R-peaks.
-    """
-    # Estimate noise baseline
-    signal_std = np.std(filtered)
-    threshold = max(0.35 * signal_std, 0.05)
-    
-    # Minimum distance between peaks (refractory period)
-    min_distance = int(0.25 * fs_hz)  # 250 ms for 250 Hz
-    # (heart can't beat faster than ~240 bpm = 250 ms between beats)
-    
-    # Find peaks using SciPy
-    peaks, _ = find_peaks(filtered, distance=min_distance, prominence=threshold)
-    return peaks
-```
-
-**What this does:**
-1. Sets threshold = 35% of signal std (adaptive to noise level).
-2. Enforces minimum 250ms between peaks (physiological constraint).
-3. Returns indices of R-peaks in the window.
-
-**Example output:**
-```
-filtered_ecg = [0.1, 0.3, 1.2, 0.2, -0.1, ..., 0.95, 1.15, 0.3, ...]
-                                    ↑                ↑       ↑
-R-peak indices:                    [42,    ...,     315,    892]
-```
-
----
-
-### 6. **HR Estimation** — In `estimate_hr_bpm()`
-
-```python
-def estimate_hr_bpm(r_peaks, fs_hz):
-    """
-    Calculates heart rate from RR intervals.
-    """
-    if len(r_peaks) < 2:
-        return None  # Need at least 2 peaks
-    
-    # Time between consecutive R-peaks (in seconds)
-    rr_sec = np.diff(r_peaks) / float(fs_hz)
-    # Example: peaks at [250, 500, 750] samples
-    #         rr_sec = [1.0, 1.0] seconds
-    #         rr_sec = [60 bpm, 60 bpm] ← HR from each interval
-    
-    # Filter for physiological range (40–180 bpm = 0.33–1.5 sec)
-    rr_sec = rr_sec[(rr_sec > 0.3) & (rr_sec < 2.0)]
-    if rr_sec.size == 0:
-        return None
-    
-    # Average HR
-    mean_rr = np.mean(rr_sec)
-    hr_bpm = 60.0 / mean_rr
-    return hr_bpm
-```
-
-**Example:**
-```
-R-peaks at: [125, 375, 625, 875] (samples)
-Differences: [250, 250, 250] (samples)
-At 250 Hz: [1.0, 1.0, 1.0] (seconds)
-HR = 60 / 1.0 = 60 bpm
-
-If one interval is 0.5s (off-beat):
-RR intervals: [1.0, 0.5, 1.0] → filtered to [1.0, 1.0]
-Mean RR = 1.0s → HR = 60 bpm (robust to occasional ectopy)
-```
-
----
-
-### 7. **Signal Quality Index (SQI)** — In `compute_sqi()`
-
-```python
-def compute_sqi(raw, filtered, r_peaks, fs_hz):
-    """
-    Heuristic 0–1 score indicating ECG quality.
-    """
-    score = 1.0
-    
-    # Penalty 1: Flatline detection (low std = flat signal)
-    if np.std(raw) < 1e-4:
-        score -= 0.8
-    
-    # Penalty 2: Excessive flatness (too many zero-difference samples)
-    diff = np.abs(np.diff(raw))
-    flat_ratio = np.mean(diff < 1e-5)
-    if flat_ratio > 0.2:  # >20% of samples don't change
-        score -= 0.4
-    
-    # Penalty 3: High-frequency noise
-    hf_noise = raw - filtered
-    noise_ratio = np.std(hf_noise) / (np.std(filtered) + 1e-6)
-    if noise_ratio > 1.0:  # Noise > signal
-        score -= 0.3
-    elif noise_ratio > 0.7:  # Noise ~70% of signal
-        score -= 0.15
-    
-    # Penalty 4: Implausible peak density
-    peak_count = len(r_peaks)
-    expected_min = int(40 / 60 * 5)   # Min ~3 peaks in 5s (40 bpm min)
-    expected_max = int(180 / 60 * 5)  # Max ~15 peaks in 5s (180 bpm max)
-    if peak_count < expected_min or peak_count > expected_max:
-        score -= 0.2
-    
-    return max(0.0, min(1.0, score))
-```
-
-**Example scenarios:**
-```
-Scenario 1: Clean signal
-- std(raw) = 0.5 (good)
-- flat_ratio = 0.01 (clean)
-- noise_ratio = 0.2 (low noise)
-- peak_count = 6 (4–5s window, ~72 bpm, normal)
-→ score = 1.0 (excellent)
-
-Scenario 2: Noisy signal
-- std(raw) = 0.3 (okay)
-- flat_ratio = 0.05 (clean)
-- noise_ratio = 1.2 (high noise)
-- peak_count = 5 (okay)
-→ score = 1.0 - 0.3 = 0.7 (acceptable)
-
-Scenario 3: Disconnected electrode (flatline)
-- std(raw) = 1e-5 (flatline!)
-- flat_ratio = 0.95 (all samples same)
-- noise_ratio = 0.01
-- peak_count = 0
-→ score = 1.0 - 0.8 - 0.4 - 0.2 = -0.4 → clamped to 0.0 (poor/disconnected)
-```
-
----
-
-### 8. **viewer.py** — Dashboard Simulator
-
-```python
-def main():
-    # Subscribe to edge/patient1/features
-    # On message: print HR + SQI + notes
-    
-    # Optional: plot HR trend in real-time
-```
-
-**Output:**
-```
-[viewer] patient=patient1 window=1700000002345 hr=72.4 sqi=0.91 notes=[]
-[viewer] patient=patient1 window=1700000007345 hr=71.8 sqi=0.88 notes=[]
-[viewer] patient=patient1 window=1700000012345 hr=73.2 sqi=0.85 notes=['low_sqi']
-```
-
----
-
-## Processing Pipeline Explained
-
-### Full end-to-end example with actual numbers
-
-**Input:** Synthetic 72 bpm ECG, 250 Hz, 30 minutes
-
-**T=0ms:**
-```
-Replayer generates:
-- Signal: P + QRS + T waves at ~0.83s intervals (72 bpm)
-- Baseline drift: 0.2 Hz sine wave
-- Powerline: 50 Hz sine
-- Noise: Gaussian, σ=0.03
-
-Publishes chunk 0:
+**High-rate sensor chunk** (ECG, PPG):
+```json
 {
   "patient_id": "patient1",
-  "t0_ms": 0,
+  "t_ms": 1000,
   "fs_hz": 250,
-  "samples": [0.05, 0.07, ..., 0.02]  # 62 samples (250ms @ 250Hz)
+  "samples": [0.12, -0.05, 0.87, ...]
 }
 ```
 
-**T=250ms:**
-```
-Replayer publishes chunk 1 (t0_ms=250)
-Edge Preprocessor buffers: [0.05, 0.07, ..., 0.02] + [0.03, 0.06, ..., 0.01]
-Total: 124 samples (496 ms)
-Edge checks: 124 samples < 1250 samples (5s) → wait
-```
-
-**T=5000ms (5 seconds, ~20 chunks published):**
-```
-Edge Preprocessor now has 1250+ samples
-Extracts window[0:1250] (samples from t=0 to t=5000 ms)
-
-Preprocessing:
-1. Detrend: removes baseline drift
-2. Bandpass 0.5–40 Hz: removes DC + muscle noise + powerline
-3. Notch 50 Hz: precision removal of remaining powerline
-
-→ Filtered ECG is now clean (P, QRS, T waves visible)
-
-Peak detection:
-- std(filtered) ≈ 0.4
-- threshold = max(0.35 * 0.4, 0.05) = 0.14
-- Finds peaks > 0.14, separated by ≥250 ms
-- Found 6 peaks (at ~833ms intervals for 72 bpm)
-
-R-peak indices: [187, 395, 603, 811, 1019, 1227] (samples)
-RR intervals: [0.833, 0.833, 0.833, 0.833, 0.832] seconds
-HR = 60 / 0.833 = 72.0 bpm ✓
-
-SQI calculation:
-- std(raw) = 0.35 (good)
-- flat_ratio = 0.02 (minimal flatness)
-- noise_ratio = 0.25 (low noise)
-- peak_count = 6 (4–5s is normal)
-→ score = 1.0
-
-Publishes:
+**Low-rate sensor sample** (SpO2, Temp):
+```json
 {
   "patient_id": "patient1",
-  "window_start_ms": 0,
-  "window_sec": 5,
-  "hr_bpm": 72.0,
-  "sqi": 1.0,
-  "notes": []
+  "t_ms": 5000,
+  "value": 97.2
 }
-
-Viewer receives & prints:
-[viewer] patient=patient1 window=0 hr=72.0 sqi=1.0 notes=[]
 ```
 
-**T=10000ms (10 seconds):**
+**IMU chunk** (3-axis accelerometer):
+```json
+{
+  "patient_id": "patient1",
+  "t_ms": 1000,
+  "fs_hz": 50,
+  "samples": [[0.01, -0.02, 9.81], ...]
+}
 ```
-Edge slides buffer forward by 1250 samples
-New window starts at t=5000ms
-Extracts samples[1250:2500] (the next 5s)
-→ Second HR measurement published
+
+### 5.6 Docker vs native MQTT
+
+| Environment | Broker Setup | Why |
+|-------------|-------------|-----|
+| **Development (PC)** | Docker: `docker-compose up -d` | One command, isolated, easy cleanup |
+| **Production (Raspberry Pi)** | Native: `sudo apt install mosquitto` | Lower overhead, no Docker layer on ARM |
+| **Cloud deployment** | Managed service (AWS IoT, HiveMQ) | No broker to maintain |
+
+---
+
+## 6. Data Acquisition — Sensor Simulation
+
+### 6.1 Simulated sensors
+
+The `replayer.py` module acts as a digital twin of the ESP32 sensor node, generating
+realistic synthetic signals for 5 sensor types:
+
+| Sensor | Sampling Rate | Signal Characteristics |
+|--------|--------------|----------------------|
+| **ECG** | 250 Hz | P-QRS-T morphology, baseline wander, 50 Hz powerline noise, Gaussian noise |
+| **PPG** (Photoplethysmography) | 100 Hz | Systolic peak, dicrotic notch, diastolic component, baseline variation |
+| **IMU** (Accelerometer 3-axis) | 50 Hz | Gravity on Z-axis (~1g), optional motion bursts, Gaussian noise |
+| **SpO2** (Pulse Oximetry) | 1 Hz | Baseline ~98%, optional desaturation drop events with recovery |
+| **Temperature** | 0.2 Hz | Random walk around 37°C, configurable drift and noise |
+
+### 6.2 Synthetic ECG generation
+
+```
+For each heartbeat at interval 60/HR_bpm:
+  R-peak   : Gaussian pulse (amplitude=1.0, width=0.01s)
+  P-wave   : Gaussian pulse (amplitude=0.15, 160ms before R)
+  T-wave   : Gaussian pulse (amplitude=0.3, 200ms after R)
+
+Added artifacts:
+  + Baseline drift  : low-frequency sinusoidal wander
+  + Powerline noise : 50 Hz sinusoidal interference
+  + Random noise    : Gaussian (configurable std)
+```
+
+### 6.3 Publishing behavior
+
+- Each sensor publishes at its native chunk rate (ECG: every 250 ms, SpO2: every 1 s)
+- Real-time pacing with optional speed multiplier (`--speed 2.0`)
+- Separate threads per sensor stream
+- Optional gap injection and out-of-order packet simulation for robustness testing
+
+---
+
+## 7. Edge AI Pipeline — 6-Step Processing
+
+The core of the AI system. Every **5 seconds**, the Edge Preprocessor collects a window of
+multi-sensor data and processes it through 6 sequential steps:
+
+```
+ Raw sensor data (MQTT)
+         │
+         ▼
+ ┌───────────────────────┐
+ │ Step 1: Feature       │  18 signal-processing formulas
+ │ Extraction            │  ECG, PPG, SpO2, Temp, IMU, Respiration
+ └──────────┬────────────┘
+            ▼
+ ┌───────────────────────┐
+ │ Step 2: Clinical      │  7 threshold-based rules
+ │ Rules                 │  Medical standards → severity
+ └──────────┬────────────┘
+            ▼
+ ┌───────────────────────┐
+ │ Step 3: ML            │  3 models: LogReg + RF + XGBoost
+ │ Inference             │  19-feature vector → predictions
+ └──────────┬────────────┘
+            ▼
+ ┌───────────────────────┐
+ │ Step 4: Decision      │  Rules + ML → final severity
+ │ Fusion                │  Priority: rules baseline, ML escalates
+ └──────────┬────────────┘
+            ▼
+ ┌───────────────────────┐
+ │ Step 5: Publish       │  MQTT features + events
+ │ Step 6: Alert + Log   │  Console output + CSV file
+ └───────────────────────┘
+```
+
+### 7.1 Signal Preprocessing & Feature Extraction
+
+**Module**: `feature_extraction.py` — Implements **18 formulas** from the medical specifications.
+
+#### 7.1.1 ECG Processing Chain
+
+```
+Raw ECG (250 Hz, 1250 samples per window)
+    │
+    ├── scipy.signal.detrend()           → Remove baseline drift
+    ├── Butterworth bandpass (0.5–40 Hz, order 3)  → Remove out-of-band noise
+    ├── IIR notch filter (50 Hz, Q=30)   → Remove powerline interference
+    │
+    ▼
+Filtered ECG
+    │
+    ├── scipy.signal.find_peaks()        → Detect R-peaks
+    │     (adaptive prominence = 35% of std, min distance = 250 ms)
+    │
+    ▼
+R-peak positions
+    │
+    ├── RR intervals → HR mean/min/max (bpm)
+    ├── RR intervals → HRV SDNN = std(RR) × 1000 (ms)
+    ├── RR intervals → HRV RMSSD = sqrt(mean(diff(RR)²)) × 1000 (ms)
+    ├── Peak width   → QRS duration (ms), clamped 40–200 ms
+    ├── RR outliers  → Abnormal beat count (> 1.5σ from mean)
+    └── Quality      → ECG SQI (0–1), penalizes flatline/noise/bad peak density
+```
+
+#### 7.1.2 PPG Processing
+
+```
+Raw PPG (100 Hz, 500 samples per window)
+    │
+    ├── Butterworth bandpass (0.5–8 Hz)  → Clean signal
+    ├── Peak detection (0.4s refractory) → PPG peaks
+    │
+    ▼
+    ├── Pulse rate = 60 / peak_interval (bpm)
+    ├── Amplitude = mean(peak − trough) (mV)
+    ├── PTT = median(ECG_R → next_PPG_peak) delay (ms)
+    └── PPG SQI (0–1)
+```
+
+#### 7.1.3 Other Sensor Features
+
+| Sensor | Features Extracted | Method |
+|--------|-------------------|--------|
+| **SpO2** | Mean SpO2 (%), Min SpO2 (%), Desaturation count | Statistical analysis, 3% drop detection |
+| **Temperature** | Mean (°C), Variation (max−min), Fever flag (>38°C) | Statistical thresholds |
+| **IMU** | Movement count, Immobility flag, Agitation index, Motion score (0–1) | Magnitude threshold, composite scoring |
+| **Respiration** | Rate (breaths/min), Amplitude | ECG envelope modulation via FFT, filtered to 6–30 breaths/min |
+
+#### 7.1.4 Complete feature summary
+
+| # | Feature | Source | Unit | Range |
+|---|---------|--------|------|-------|
+| 1 | HR mean | ECG | bpm | 30–200 |
+| 2 | HR min | ECG | bpm | 30–200 |
+| 3 | HR max | ECG | bpm | 30–200 |
+| 4 | HRV SDNN | ECG | ms | 0–300 |
+| 5 | HRV RMSSD | ECG | ms | 0–300 |
+| 6 | RR mean | ECG | ms | 300–2000 |
+| 7 | QRS duration | ECG | ms | 40–200 |
+| 8 | ECG SQI | ECG | — | 0–1 |
+| 9 | Pulse rate | PPG | bpm | 30–200 |
+| 10 | PPG amplitude | PPG | mV | 0–5 |
+| 11 | PPG SQI | PPG | — | 0–1 |
+| 12 | SpO2 mean | SpO2 | % | 70–100 |
+| 13 | SpO2 min | SpO2 | % | 70–100 |
+| 14 | Desaturation count | SpO2 | count | 0–50 |
+| 15 | Temperature mean | Temp | °C | 34–42 |
+| 16 | Temperature variation | Temp | °C | 0–5 |
+| 17 | Motion score | IMU | — | 0–1 |
+| 18 | Agitation index | IMU | — | 0–10 |
+| 19 | Respiration rate | ECG-derived | breaths/min | 6–30 |
+
+---
+
+### 7.2 Clinical Rules Engine
+
+**Module**: `clinical_rules.py` — Implements **7 deterministic rules** based on medical standards.
+
+| # | Rule | Condition | Severity | Event Name |
+|---|------|-----------|----------|-----------|
+| 1 | **Critical hypoxemia** | SpO2 < 90% | CRITICAL | spo2_critical |
+| 2 | **Tachycardia** | HR > 120 bpm | HIGH | tachycardia_high |
+|   |                 | HR > 100 bpm | MODERATE | tachycardia_moderate |
+| 3 | **Bradycardia** | HR < 45 bpm | HIGH | bradycardia_high |
+|   |                 | HR < 60 bpm | MODERATE | bradycardia_moderate |
+| 4 | **Fever** | Temp > 38°C | MODERATE | fever |
+| 5 | **Apnea suspicion** | Desat index ≥ 15/hr | HIGH | apnea_suspicion |
+|   |                     | Desat index ≥ 5/hr | MODERATE | apnea_suspicion |
+| 6 | **Low signal quality** | Average SQI < 0.4 | LOW–MODERATE | low_signal_quality |
+| 7 | **Motion artifact** | Motion score > 0.5 | MODERATE–HIGH | motion_artifact |
+
+**Behavior**:
+- All 7 rules are evaluated independently (no short-circuit)
+- Multiple rules can trigger simultaneously (e.g., tachycardia + fever)
+- The maximum severity across all triggered rules becomes the rules-based severity
+- Each triggered rule generates an event with `patient_id`, `timestamp`, `event_type`, `severity`, and `details`
+
+---
+
+### 7.3 Machine Learning Inference
+
+**Module**: `ml_inference.py` — Implements **3 complementary ML models** via class `MLInferenceEngine`.
+
+#### 7.3.1 Why 3 models?
+
+Each model answers a different clinical question:
+
+| Model | Algorithm | Clinical Question | Output |
+|-------|-----------|------------------|--------|
+| **Logistic Regression** | LogisticRegression | Is this patient at risk? | `risk_score` (0–1) |
+| **Random Forest** | 50 trees, max_depth=8 | What type of event is occurring? | `event_class` (6 categories) |
+| **XGBoost** | 50 trees, max_depth=5 | Is the patient deteriorating? | `deterioration_prob` (0–1) |
+
+#### 7.3.2 Input: 19-feature vector
+
+All 3 models receive the same standardized feature vector:
+
+```
+[ hr_mean, hr_min, hr_max, hrv_sdnn, hrv_rmssd, rr_mean_ms,
+  qrs_duration_ms, ecg_sqi,
+  pulse_rate, ppg_amplitude, ppg_sqi,
+  spo2_mean, spo2_min, desaturation_count,
+  temp_mean, temp_variation,
+  motion_score, agitation_index,
+  respiration_rate ]
+```
+
+Missing or `None` values are replaced with safe defaults (0.0 for most, 1.0 for SQI fields).
+
+#### 7.3.3 Training data — 6 clinical scenarios
+
+Models are trained on **2000 synthetic samples** with realistic clinical distributions:
+
+| Scenario | HR (bpm) | SpO2 (%) | Temp (°C) | Class Label |
+|----------|----------|----------|-----------|-------------|
+| **Normal** | 60–80 | 95–100 | 36.0–37.5 | normal |
+| **Tachycardia** | 120–180 | 93–98 | 36.5–37.5 | tachycardia |
+| **Bradycardia** | 30–50 | 93–98 | 36.0–37.0 | bradycardia |
+| **Hypoxemia** | 80–110 | 70–89 | 36.5–37.5 | hypoxemia |
+| **Fever** | 85–120 | 93–98 | 38.5–41.0 | fever |
+| **Apnea risk** | 60–90 | 85–93 | 36.0–37.5 | apnea_risk |
+
+#### 7.3.4 Training results
+
+| Model | Accuracy | Notes |
+|-------|----------|-------|
+| Logistic Regression | **94.6%** | Binary: low-risk vs high-risk |
+| Random Forest | **97.8%** | 6-class classification |
+| XGBoost | **96.4%** | Binary: stable vs deteriorating |
+
+#### 7.3.5 Model persistence
+
+- Models are saved as `.joblib` files in the `models/` directory
+- On first run, if no `.joblib` files exist, models train automatically and save
+- Same `.joblib` files work on any platform (laptop → Raspberry Pi)
+- To retrain: delete `.joblib` files and restart the edge preprocessor
+
+---
+
+### 7.4 Decision Fusion Engine
+
+**Module**: `decision_engine.py` — Combines rules and ML into a **single clinical decision**.
+
+#### 7.4.1 Fusion logic
+
+```
+1. Start with rules_severity (from clinical rules engine)
+
+2. Check ML escalation:
+   if risk_score > 0.9       → escalate to CRITICAL
+   if risk_score > 0.7       → escalate to HIGH
+   if risk_score > 0.5       → escalate to MODERATE
+   if deterioration_prob > 0.8 → escalate to HIGH
+   if deterioration_prob > 0.6 → escalate to MODERATE
+
+3. Final severity = max(rules_severity, ml_severity)
+
+KEY PRINCIPLE: ML can only ESCALATE, never downgrade.
+Rules-based severity is always respected as the minimum.
+```
+
+#### 7.4.2 Output mapping
+
+| Severity Level | Color Code | Recommended Action | Clinical Meaning |
+|---------------|------------|-------------------|-----------------|
+| **LOW** | 🟢 Green | `surveillance_standard` | Patient stable, routine monitoring |
+| **MODERATE** | 🟡 Yellow | `verification_demandee` | Abnormality detected, manual verification needed |
+| **HIGH** | 🟠 Orange | `intervention_recommandee` | Clinical intervention recommended |
+| **CRITICAL** | 🔴 Red | `alerte_immediate` | Immediate medical attention required |
+
+---
+
+### 7.5 Publishing & Alerting
+
+After decision fusion, the gateway:
+
+1. **Publishes features** to MQTT topic `edge/{patient_id}/features` — JSON containing all extracted features, rules results, ML predictions, and the final decision
+2. **Publishes events** to MQTT topic `edge/{patient_id}/events` — one message per triggered clinical rule
+3. **Prints to console** with color-coded severity (green/yellow/orange/red)
+4. **Logs to CSV** file in `data/logs/` (33 columns per row, one row per 5-second window)
+
+---
+
+## 8. Real-Time Visualization Dashboard
+
+**Module**: `visualizer.py` — Single-window dashboard with 3 switchable pages.
+
+### 8.1 Architecture
+
+- **Single matplotlib figure** with `GridSpec(3, 2)` layout (6 panels per page)
+- **3 navigation buttons** at the bottom of the window for page switching
+- **Only the active page redraws** each animation tick (600 ms interval) — saves GPU/CPU
+- **Single MQTT client** subscribes to `edge/{patient_id}/features` and `edge/{patient_id}/events`
+- Thread-safe data buffers (`Buffers` class) shared between MQTT callback and animation loop
+
+### 8.2 Pages
+
+| Page | Name | Content (6 panels) |
+|------|------|-------------------|
+| **Page 1** | Raw Inputs | ECG raw waveform, PPG raw waveform, SpO2 readings, Temperature readings, IMU 3-axis plot, IMU magnitude |
+| **Page 2** | Processed | Filtered ECG + R-peaks + HR, Filtered PPG + peaks + pulse rate, SpO2 trend + desaturation, Temperature + fever threshold, Motion score, Respiration rate |
+| **Page 3** | AI Features | Vital signs banner (HR, SpO2, Temp, Resp), HRV trends (SDNN/RMSSD), SQI metrics, ML predictions (risk/deterioration/class), Decision output + clinical rules |
+
+### 8.3 Performance optimizations
+
+| Optimization | Effect |
+|-------------|--------|
+| Single window (vs 3 separate windows) | ~75% less GPU/memory usage |
+| Only active page redraws | Idle pages consume zero rendering time |
+| 600 ms update interval | Smooth enough for monitoring, light on CPU |
+| Single MQTT connection | Reduced network and threading overhead |
+
+---
+
+## 9. Data Logging (CSV)
+
+The `CsvFeatureLogger` class in `edge_preprocessor.py` records **33 columns** per 5-second
+window to `data/logs/features_YYYYMMDD_HHMMSS.csv`:
+
+**Column categories**:
+- Patient metadata (4): timestamp, patient_id, window_start, window_end
+- ECG features (8): hr_mean, hr_min, hr_max, hrv_sdnn, hrv_rmssd, rr_mean, qrs_duration, ecg_sqi
+- PPG features (4): pulse_rate, ppg_amplitude, ptt, ppg_sqi
+- SpO2 features (3): spo2_mean, spo2_min, desaturation_count
+- Temperature (3): temp_mean, temp_variation, fever_flag
+- Motion (4): motion_score, movement_count, immobility, agitation_index
+- Respiration (2): resp_rate, resp_amplitude
+- Rules (2): triggered_rules, rules_severity
+- ML predictions (3): risk_score, event_class, deterioration_prob
+- Decision (3): severity, color, action
+
+---
+
+## 10. Testing & Validation Results
+
+### 10.1 Integration test (offline, no MQTT needed)
+
+```powershell
+python test_pipeline.py
+```
+
+Tests the complete AI pipeline directly in Python without requiring the MQTT broker.
+
+**6 clinical scenarios validated:**
+
+| # | Scenario | HR | SpO2 | Temp | Rules Triggered | ML Class | Decision |
+|---|----------|-----|------|------|----------------|----------|----------|
+| 1 | Normal patient | 75 bpm | 97% | 36.8°C | none | normal | 🟢 GREEN |
+| 2 | Tachycardia | 130 bpm | 96% | 37°C | tachycardia_high | tachycardia | 🔴 RED |
+| 3 | Bradycardia | 40 bpm | 96% | 36.5°C | bradycardia | bradycardia | 🟡–🔴 |
+| 4 | Hypoxemia | 90 bpm | 85% | 37°C | spo2_critical | hypoxemia | 🔴 RED |
+| 5 | Fever | 95 bpm | 96.5% | 39°C | fever | fever | 🟠 ORANGE |
+| 6 | Multi-alarm | 135 bpm | 84% | 39.4°C | spo2_critical + tachy + fever | hypoxemia | 🔴 RED |
+
+**Example test output:**
+```
+SCENARIO: Normal patient
+  ECG:  HR_mean=75.0 HRV_SDNN=0.0 SQI=0.7
+  SpO2: mean=97.2 min=96.0
+  Rules: severity=low triggered=[]
+  ML: risk=0.061 deterioration=0.027 class=normal
+  DECISION: GREEN → surveillance_standard
+
+SCENARIO: Hypoxemia (SpO2=85%)
+  ECG:  HR_mean=90.05 HRV_SDNN=2.14 SQI=0.7
+  SpO2: mean=85.2 min=83.0
+  Rules: severity=critical triggered=['spo2_critical']
+  ML: risk=1.0 deterioration=0.992 class=hypoxemia
+  DECISION: RED → alerte_immediate
+```
+
+### 10.2 End-to-End MQTT test
+
+```powershell
+# Start broker
+docker-compose up -d
+
+# Terminal 1: Edge AI Gateway
+python src\edge_preprocessor.py --debug
+
+# Terminal 2: Sensor simulator
+python src\replayer.py --mode synthetic --hr-bpm 72 --duration-sec 120
+
+# Terminal 3: Dashboard
+python src\visualizer.py
+```
+
+**Expected results**:
+- Features published every 5 seconds
+- HR ≈ 72 bpm (±5%)
+- Decision = GREEN for normal conditions
+
+### 10.3 Robustness testing
+
+```powershell
+# Test with gaps and out-of-order packets
+python src\replayer.py --mode synthetic --inject-gap-every 25 --inject-oop-every 40
+
+# Test different clinical conditions
+python src\replayer.py --hr-bpm 130   # Tachycardia → expect RED
+python src\replayer.py --hr-bpm 40    # Bradycardia → expect ORANGE/RED
 ```
 
 ---
 
-## Testing & Validation
+## 11. Data Flow — Complete Example
 
-### Test 1: Basic functionality
-```powershell
-.\run_all.bat
-# Check:
-# ✓ Viewer prints HR every 5 seconds
-# ✓ HR ≈ 72 bpm (set by --hr-bpm)
-# ✓ SQI ≥ 0.8 (clean synthetic signal)
-# ✓ No errors in edge preprocessor
+### 11.1 Normal operation timeline
+
+```
+T=0s     System starts
+         ├── Mosquitto broker listening on localhost:1883
+         ├── Edge Preprocessor connects, loads 3 ML models
+         ├── Visualizer connects to features/events topics
+         └── Replayer begins generating sensor data
+
+T=0.25s  First ECG chunk published (62 samples at 250 Hz)
+         └── Edge buffers: 62/1250 = 5% of window filled
+
+T=1s     Multiple sensors active
+         ├── ECG: 250 samples buffered
+         ├── PPG: 100 samples buffered
+         ├── SpO2: 1 sample received
+         └── Temp: 0 samples yet (0.2 Hz rate)
+
+T=5s     ★ First 5-second window complete — AI pipeline runs:
+         │
+         ├── Feature Extraction
+         │   ├── ECG (1250 samples): HR=72.0, HRV_SDNN=45ms, QRS=92ms, SQI=0.91
+         │   ├── PPG (500 samples): pulse_rate=72.1, PTT=150ms
+         │   ├── SpO2 (5 samples): mean=97.2, min=96.0
+         │   ├── Temp (1 sample): mean=36.8, fever=false
+         │   ├── IMU (250 triplets): motion_score=0.0, immobility=true
+         │   └── Respiration: 15 breaths/min (from ECG envelope)
+         │
+         ├── Clinical Rules → no rules triggered, severity=LOW
+         ├── ML Inference → risk=0.06, class=normal, deterioration=0.03
+         ├── Decision Fusion → LOW → 🟢 GREEN → surveillance_standard
+         │
+         └── Output: MQTT publish + console + CSV log
+
+T=10s    Second window processed...
+T=15s    Third window processed...
 ```
 
-### Test 2: Robustness (gaps + out-of-order)
-```powershell
-python .\src\replayer.py --mode synthetic --duration-sec 60 --chunk-ms 250 --inject-gap-every 25 --inject-oop-every 40
-# Check edge log for:
-# ✓ gap_filled_zeros (when gap injected)
-# ✓ overlap_trimmed (when out-of-order chunk received)
-# ✓ HR still calculated (no crashes)
-# ✓ SQI may drop (data quality degraded by injection)
-```
+### 11.2 Alarm scenario — Hypoxemia detected
 
-### Test 3: Different heart rates
-```powershell
-python .\src\replayer.py --hr-bpm 60   # Bradycardic
-python .\src\replayer.py --hr-bpm 120  # Tachycardic
-# Check:
-# ✓ Viewer HR matches requested BPM (±5%)
-# ✓ No "hr_out_of_range" notes for 60–120 bpm
 ```
-
-### Test 4: Noisy signal
-```powershell
-python .\src\replayer.py --noise-std 0.1  # Increase noise from 0.03
-# Check:
-# ✓ SQI drops (but >0.5 if still readable)
-# ✓ HR may be less stable
-# ✓ Notes include "low_sqi" when score < 0.5
-```
-
-### Test 5: File replay (bring your own ECG)
-```powershell
-# Create file data\my_ecg.csv with ECG values
-python .\src\replayer.py --mode file --file .\data\my_ecg.csv --loop
-# Check:
-# ✓ All values loaded
-# ✓ Loops continuously
-# ✓ HR/SQI calculated from real data
+T=30s    SpO2 drops to 85%
+         │
+         ├── Feature Extraction
+         │   └── spo2_mean=85.2, spo2_min=83.0
+         │
+         ├── Clinical Rules
+         │   └── Rule 1 fires: SpO2 < 90% → CRITICAL (spo2_critical)
+         │
+         ├── ML Inference
+         │   ├── risk_score = 1.0
+         │   ├── event_class = "hypoxemia"
+         │   └── deterioration_prob = 0.99
+         │
+         ├── Decision Fusion
+         │   ├── Rules: CRITICAL (baseline)
+         │   ├── ML: risk > 0.9 → CRITICAL (no further escalation needed)
+         │   └── Final: CRITICAL → 🔴 RED → alerte_immediate
+         │
+         └── Output:
+             ├── MQTT: features + event published
+             ├── Console: RED alerte_immediate [spo2_critical]
+             └── CSV: row logged with all values
 ```
 
 ---
 
-## Future Hardware Integration
+## 12. Project Files & Module Map
 
-### When ESP32 + Raspberry Pi arrive
+### 12.1 File structure
 
-#### 1. **Physical ESP32**
-Replace `replayer.py` with:
-```cpp
-// Arduino / ESP-IDF firmware
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include <driver/adc.h>
-
-// Read ECG from ADC pin
-uint16_t ecg_raw = analogRead(ECG_PIN);
-float ecg_val = ecg_raw / 4096.0 * 3.3;  // Convert to voltage
-
-// Buffer and publish every 250ms
-if (millis() - last_publish >= 250) {
-    String payload = "{\"patient_id\": \"patient1\", \"t0_ms\": " + String(millis()) + 
-                     ", \"fs_hz\": 250, \"samples\": [" + readings + "]}";
-    client.publish("sim/patient1/ecg", payload);
-    last_publish = millis();
-}
+```
+edge_mqtt_demo/
+├── docker-compose.yml          ← Mosquitto MQTT broker configuration
+├── requirements.txt            ← Python dependencies (7 packages)
+├── run_all.bat                 ← One-click launcher (broker + 3 services)
+├── DOCUMENTATION.md            ← This document
+├── README.md                   ← Project overview
+│
+├── src/
+│   ├── common.py               ← Shared types, MQTT config, validation
+│   ├── feature_extraction.py   ← 18 signal-processing formulas
+│   ├── clinical_rules.py       ← 7 clinical threshold rules
+│   ├── ml_inference.py         ← 3 ML models (LR + RF + XGB)
+│   ├── decision_engine.py      ← Rules + ML fusion logic
+│   ├── edge_preprocessor.py    ← Main Edge AI Gateway + CSV logger
+│   ├── replayer.py             ← ESP32 sensor simulator
+│   ├── visualizer.py           ← Single-window 3-page dashboard
+│   └── viewer.py               ← Legacy console/plot viewer (optional)
+│
+├── models/
+│   ├── logistic_regression.joblib
+│   ├── random_forest.joblib
+│   └── xgboost.joblib
+│
+└── data/
+    └── logs/                   ← CSV feature logs (auto-created)
 ```
 
-**Changes needed:**
-- ✓ Same MQTT topic: `sim/patient1/ecg`
-- ✓ Same JSON schema
-- ✓ Broker host: either local `192.168.1.X:1883` or cloud IP
-- → **Everything else stays the same!**
+### 12.2 Module dependency graph
 
-#### 2. **Physical Raspberry Pi**
-Copy `edge_preprocessor.py` to Pi:
+```
+common.py ◄──────────────── All modules depend on this
+    ▲
+    │
+    ├── feature_extraction.py ◄─┐
+    ├── clinical_rules.py     ◄─┤
+    ├── ml_inference.py       ◄─┼── edge_preprocessor.py
+    └── decision_engine.py    ◄─┘
+                                          │
+                                          ▼ MQTT
+replayer.py ──── MQTT ────► edge_preprocessor.py ──── MQTT ────► visualizer.py
+(sensor data)              (AI processing)                      (dashboard)
+```
+
+### 12.3 Running the system
+
+**One-click launch** (Windows):
+```powershell
+run_all.bat
+```
+
+This starts 4 components in order:
+1. Mosquitto broker (Docker)
+2. Edge Preprocessor (separate window, `--debug` mode)
+3. Visualizer dashboard (separate window)
+4. Replayer (separate window, 5 minutes of synthetic data at 72 bpm)
+
+**Manual launch** (any OS):
+```powershell
+docker-compose up -d                                          # 1. Broker
+python src/edge_preprocessor.py --debug                       # 2. Gateway
+python src/visualizer.py                                      # 3. Dashboard
+python src/replayer.py --mode synthetic --duration-sec 300     # 4. Sensors
+```
+
+---
+
+## 13. Deployment — From Simulation to Real Hardware
+
+### 13.1 What changes in production?
+
+```
+SIMULATION (current):
+  replayer.py ──► MQTT (Docker) ──► edge_preprocessor.py ──► visualizer.py
+  [PC]             [PC]             [PC]                     [PC]
+
+PRODUCTION (target):
+  Real sensors ──► MQTT (native) ──► edge_preprocessor.py ──► Web dashboard
+  [ESP32]          [Raspberry Pi]    [Raspberry Pi]           [Server/Cloud]
+```
+
+| Component | Simulation | Production |
+|-----------|-----------|------------|
+| Data source | `replayer.py` (synthetic) | Real sensors (MAX30102, AD8232, MPU6050) on ESP32 |
+| MQTT broker | Mosquitto via Docker | Mosquitto native (`sudo apt install mosquitto`) |
+| AI Gateway | `edge_preprocessor.py` on PC | Same code on Raspberry Pi |
+| ML models | `.joblib` trained on synthetic data | Same files, or retrained on real patient data |
+| Dashboard | `visualizer.py` (matplotlib) | Web dashboard or cloud platform |
+
+### 13.2 Deploying to Raspberry Pi
+
 ```bash
+# Transfer project to Pi
 scp -r edge_mqtt_demo pi@192.168.1.100:/home/pi/
+
+# On the Pi
 ssh pi@192.168.1.100
 cd /home/pi/edge_mqtt_demo
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Install native MQTT broker (no Docker needed)
+sudo apt install mosquitto mosquitto-clients
+
+# Launch Edge AI Gateway
 python src/edge_preprocessor.py --broker-host 192.168.1.100
 ```
 
-**Changes needed:**
-- ✓ `--broker-host 192.168.1.100` (instead of `localhost`)
-- ✓ Optional: add startup script to systemd (auto-start at boot)
-- → **Code is 100% identical!**
+### 13.3 Retraining models with real data
 
-#### 3. **Add more sensors (PPG/SpO2/Temp)**
-New topics:
-```
-sim/patient1/ppg       → edge process → edge/patient1/ppg_features
-sim/patient1/spo2      → edge process → edge/patient1/spo2_status
-sim/patient1/temp      → edge process → edge/patient1/temp_status
-```
+When real patient data becomes available:
+1. Replace `_generate_synthetic_data()` in `ml_inference.py` with real dataset loading
+2. Delete existing `.joblib` files in `models/`
+3. Restart `edge_preprocessor.py` — models retrain automatically and save new `.joblib` files
 
-Create new subscribers in `edge_preprocessor.py`:
-```python
-# Subscribe to multiple topics
-client.subscribe("sim/patient1/ecg")
-client.subscribe("sim/patient1/ppg")
-client.subscribe("sim/patient1/spo2")
+### 13.4 Production security (future)
 
-# Multi-sensor buffering (align by timestamp)
-stream_states["patient1"]["ecg"] = StreamState(...)
-stream_states["patient1"]["ppg"] = StreamState(...)
-stream_states["patient1"]["spo2"] = StreamState(...)
-```
-
-#### 4. **Edge persistence** (buffering if Raspberry goes offline)
-```python
-import sqlite3
-
-# Store features locally
-conn = sqlite3.connect('edge_cache.db')
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS features
-             (id INT, patient_id TEXT, window_start_ms INT, hr_bpm REAL, sqi REAL, timestamp DATETIME)''')
-c.execute('INSERT INTO features VALUES (?, ?, ?, ?, ?, datetime("now"))', 
-          (patient_id, window_start_ms, hr_bpm, sqi))
-conn.commit()
-```
-
----
-
-## Summary: Technology Choices & Rationale
-
-| Tech | Why | Trade-off |
-|------|-----|-----------|
-| **MQTT** | Standard IoT, decouples services | Fixed network dependency |
-| **Python** | FastIteration + NumPy/SciPy | Not real-time safe (GC pauses) |
-| **NumPy** | Fast array math | Requires C extensions |
-| **SciPy** | Reliable filtering/peak finding | Heavier than DIY (ok on Raspi) |
-| **Paho-MQTT** | Pure Python, easy callbacks | Slower than C libs (ok for 250Hz) |
-| **Docker** | Instant Mosquitto setup | Requires Docker Desktop |
-| **JSON** | Human-readable, debuggable | Less compact than protobuf (ok for 250Hz) |
-
----
-
-## Next Steps
-
-1. ✅ **Run `.\run_all.bat`** to validate full pipeline.
-2. ✅ **Monitor edge logs** for preprocessing notes.
-3. ✅ **Test robustness** with gap/OOP injection.
-4. ✅ **Extend**: add PPG/SpO2 simulators and multi-sensor windowing.
-5. ✅ **Deploy**: when hardware arrives, swap publisher + move to Raspberry.
-
----
-
-**Questions?** Every line of code is documented; ask about any section!
+- Add TLS encryption to MQTT (certificates in Mosquitto config)
+- Add username/password authentication to MQTT broker
+- Add `systemd` service for auto-start at boot on Raspberry Pi

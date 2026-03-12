@@ -1,29 +1,29 @@
 from __future__ import annotations
 
 """
-Edge Gateway / Multi-Sensor Preprocessor
-==========================================
-Subscribes to all sensor topics, buffers data, processes in 5-second windows,
-extracts features, detects events, and publishes to output topics.
+Edge AI Gateway — Smart Medical Mat
+======================================
+Full edge processing pipeline per PDF architecture §1.2:
+  a) Ingestion & synchronization
+  b) Signal preprocessing
+  c) Feature extraction
+  d) Clinical rules engine
+  e) ML inference (XGBoost / Random Forest / Logistic Regression)
+  f) Decision engine & alert generation
 
-Input topics (from ESP32/simulator):
-- sim/patient1/ecg (250 Hz chunks)
-- sim/patient1/ppg (100 Hz chunks)
-- sim/patient1/imu (50 Hz triplet chunks)
-- sim/patient1/spo2 (1 Hz samples)
-- sim/patient1/temp (0.2 Hz samples)
+Input topics  (ESP32/simulator): sim/<device>/ecg|ppg|imu|spo2|temp
+Output topics (edge gateway):    edge/<device>/features|events
 
-Output topics:
-- edge/patient1/features (unified features every 5 seconds)
-- edge/patient1/events (events on conditions)
-
-Future hardware: Same code runs on Raspberry Pi with real ESP32 data.
+Simulation mode: runs on laptop. Same code deploys to Raspberry Pi.
 """
 
 import argparse
+import csv
+import os
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -31,12 +31,9 @@ import paho.mqtt.client as mqtt
 
 from common import (
     DEFAULT_DEVICE_ID,
-    EventType,
     MqttConfig,
     SensorConfig,
-    Severity,
     chunk_duration_ms,
-    create_event,
     create_features,
     get_input_topics,
     get_output_topics,
@@ -49,10 +46,20 @@ from common import (
     validate_imu_chunk_message,
     validate_sample_message,
 )
+from feature_extraction import (
+    extract_ecg_features,
+    extract_motion_features,
+    extract_ppg_features,
+    extract_respiration_features,
+    extract_spo2_features,
+    extract_temp_features,
+)
+from clinical_rules import evaluate_clinical_rules
+from decision_engine import make_decision
+from ml_inference import MLInferenceEngine
 
-# SciPy is optional but recommended for better signal processing
 try:
-    from scipy.signal import butter, detrend, filtfilt, find_peaks, iirnotch
+    from scipy.signal import find_peaks  # noqa: F401 — availability check
 
     SCIPY_AVAILABLE = True
 except ImportError:
@@ -213,327 +220,117 @@ class SampleBuffer:
         return values
 
 
-# =============================================================================
-# SIGNAL PROCESSING
-# =============================================================================
-
-def preprocess_ecg(window: np.ndarray, fs_hz: int, notch_hz: Optional[float]) -> np.ndarray:
-    """Apply ECG preprocessing: detrend, bandpass, notch filter."""
-    x = window.astype(float)
-
-    if SCIPY_AVAILABLE:
-        x = detrend(x, type="linear")
-
-        nyq = fs_hz / 2.0
-        low = 0.5 / nyq
-        high = 40.0 / nyq
-        b, a = butter(3, [low, min(high, 0.99)], btype="band")
-        x = filtfilt(b, a, x)
-
-        if notch_hz is not None and 0 < notch_hz < nyq:
-            b_n, a_n = iirnotch(w0=notch_hz / nyq, Q=30)
-            x = filtfilt(b_n, a_n, x)
-    else:
-        # Fallback: simple mean removal
-        x = x - np.mean(x)
-
-    return x
-
-
-def preprocess_ppg(window: np.ndarray, fs_hz: int) -> np.ndarray:
-    """Apply PPG preprocessing: detrend, bandpass 0.5-8 Hz."""
-    x = window.astype(float)
-
-    if SCIPY_AVAILABLE:
-        x = detrend(x, type="linear")
-
-        nyq = fs_hz / 2.0
-        low = 0.5 / nyq
-        high = 8.0 / nyq
-        b, a = butter(2, [low, min(high, 0.99)], btype="band")
-        x = filtfilt(b, a, x)
-    else:
-        x = x - np.mean(x)
-
-    return x
-
-
-def detect_peaks(filtered: np.ndarray, fs_hz: int, min_hr: float = 40, max_hr: float = 180) -> np.ndarray:
-    """Detect peaks (R-peaks for ECG, systolic peaks for PPG)."""
-    if filtered.size < fs_hz:
-        return np.array([], dtype=int)
-
-    signal_std = float(np.std(filtered))
-    if signal_std < 1e-6:
-        return np.array([], dtype=int)
-
-    threshold = max(0.35 * signal_std, 0.05)
-    # Minimum peak distance based on max HR
-    min_distance = int((60.0 / max_hr) * fs_hz)
-
-    if SCIPY_AVAILABLE:
-        peaks, _ = find_peaks(filtered, distance=min_distance, prominence=threshold)
-        return peaks.astype(int)
-
-    # Fallback: simple local maxima
-    candidates = np.where(
-        (filtered[1:-1] > filtered[:-2])
-        & (filtered[1:-1] > filtered[2:])
-        & (filtered[1:-1] > threshold)
-    )[0] + 1
-
-    selected: List[int] = []
-    for idx in candidates:
-        if not selected or (idx - selected[-1]) >= min_distance:
-            selected.append(int(idx))
-    return np.asarray(selected, dtype=int)
-
-
-def estimate_hr_bpm(peaks: np.ndarray, fs_hz: int) -> Optional[float]:
-    """Estimate heart rate from peak intervals."""
-    if len(peaks) < 2:
-        return None
-
-    intervals_sec = np.diff(peaks) / float(fs_hz)
-    # Filter physiological RR intervals (0.3s to 2.0s = 30-200 bpm)
-    valid = intervals_sec[(intervals_sec > 0.3) & (intervals_sec < 2.0)]
-    if len(valid) == 0:
-        return None
-
-    return float(60.0 / np.mean(valid))
-
-
-def compute_ecg_sqi(raw: np.ndarray, filtered: np.ndarray, peaks: np.ndarray, fs_hz: int) -> float:
-    """Compute Signal Quality Index for ECG."""
-    score = 1.0
-
-    # Check for flat signal
-    raw_std = float(np.std(raw))
-    if raw_std < 1e-4:
-        score -= 0.8
-
-    # Check for excessive flat segments
-    diff = np.abs(np.diff(raw)) if raw.size > 1 else np.array([0.0])
-    flat_ratio = float(np.mean(diff < 1e-5))
-    if flat_ratio > 0.2:
-        score -= 0.4
-
-    # Check noise ratio
-    hf_noise = raw - filtered
-    noise_ratio = float(np.std(hf_noise) / (np.std(filtered) + 1e-6))
-    if noise_ratio > 1.0:
-        score -= 0.3
-    elif noise_ratio > 0.7:
-        score -= 0.15
-
-    # Check peak count (expected 3-15 peaks in 5s for 40-180 bpm)
-    expected_min = 3
-    expected_max = 15
-    if len(peaks) < expected_min or len(peaks) > expected_max:
-        score -= 0.2
-
-    return float(np.clip(score, 0.0, 1.0))
-
-
-def compute_ppg_sqi(raw: np.ndarray, filtered: np.ndarray, peaks: np.ndarray, fs_hz: int) -> float:
-    """Compute Signal Quality Index for PPG."""
-    score = 1.0
-
-    raw_std = float(np.std(raw))
-    if raw_std < 1e-4:
-        score -= 0.8
-
-    # Check peak regularity
-    if len(peaks) >= 3:
-        intervals = np.diff(peaks)
-        interval_std = float(np.std(intervals) / (np.mean(intervals) + 1e-6))
-        if interval_std > 0.3:
-            score -= 0.3
-
-    # Check noise
-    hf_noise = raw - filtered
-    noise_ratio = float(np.std(hf_noise) / (np.std(filtered) + 1e-6))
-    if noise_ratio > 1.5:
-        score -= 0.3
-
-    return float(np.clip(score, 0.0, 1.0))
-
-
-def compute_motion_score(imu_window: np.ndarray) -> Tuple[float, List[str]]:
-    """
-    Compute motion score from IMU data.
-    Returns (score, notes) where score is 0-1 (0=still, 1=high motion).
-    """
-    notes: List[str] = []
-
-    if imu_window.size == 0:
-        return 0.0, ["no_imu_data"]
-
-    # Compute magnitude of acceleration
-    magnitudes = np.sqrt(np.sum(imu_window ** 2, axis=1))
-
-    # Remove gravity baseline (~1g when still)
-    magnitudes_detrended = magnitudes - 1.0
-
-    # Compute variance as motion indicator
-    variance = float(np.var(magnitudes_detrended))
-
-    # Normalize to 0-1 scale (empirical thresholds)
-    # variance < 0.01 -> still
-    # variance > 0.5 -> high motion
-    score = float(np.clip(variance / 0.5, 0.0, 1.0))
-
-    if score > 0.5:
-        notes.append("high_motion")
-    elif score > 0.2:
-        notes.append("moderate_motion")
-
-    return score, notes
+# Signal processing and feature extraction are now in feature_extraction.py
+# Clinical rules are now in clinical_rules.py
+# ML inference is now in ml_inference.py
+# Decision fusion is now in decision_engine.py
 
 
 # =============================================================================
-# FEATURE EXTRACTION
+# CSV FEATURE LOGGER
 # =============================================================================
 
-def process_ecg_window(
-    raw: np.ndarray,
-    fs_hz: int,
-    notch_hz: Optional[float],
-    motion_score: float
-) -> Dict[str, Any]:
-    """Process ECG window and return features."""
-    if len(raw) < fs_hz:
-        return {"hr_bpm": None, "sqi": 0.0, "notes": ["insufficient_data"]}
-
-    filtered = preprocess_ecg(raw, fs_hz, notch_hz)
-    peaks = detect_peaks(filtered, fs_hz)
-    hr_bpm = estimate_hr_bpm(peaks, fs_hz)
-    sqi = compute_ecg_sqi(raw, filtered, peaks, fs_hz)
-
-    notes: List[str] = []
-    if hr_bpm is None:
-        notes.append("insufficient_data")
-    elif hr_bpm < 40 or hr_bpm > 180:
-        notes.append("hr_out_of_range")
-
-    if sqi < 0.5:
-        notes.append("low_sqi")
-
-    # Degrade SQI note if high motion
-    if motion_score > 0.5:
-        notes.append("motion_artifact")
-        sqi = max(0.0, sqi - 0.2)
-
-    return {
-        "hr_bpm": round(hr_bpm, 2) if hr_bpm is not None else None,
-        "sqi": round(sqi, 3),
-        "notes": notes
-    }
+CSV_COLUMNS = [
+    "timestamp", "patient_id", "window_start_ms", "window_sec",
+    # ECG
+    "ecg_hr_mean", "ecg_hr_min", "ecg_hr_max",
+    "ecg_hrv_sdnn", "ecg_hrv_rmssd", "ecg_qrs_duration_ms",
+    "ecg_abnormal_beats", "ecg_sqi",
+    # PPG
+    "ppg_pulse_rate", "ppg_amplitude", "ppg_ptt_ms", "ppg_sqi",
+    # SpO2
+    "spo2_mean", "spo2_min", "spo2_desaturation_count",
+    # Temperature
+    "temp_mean", "temp_variation", "temp_fever",
+    # Motion
+    "motion_mvt_count", "motion_immobility", "motion_agitation_index", "motion_score",
+    # Respiration
+    "resp_rate_bpm", "resp_amplitude",
+    # Rules
+    "rules_triggered", "rules_severity",
+    # ML
+    "ml_risk_score", "ml_event_class", "ml_deterioration_prob",
+    # Decision
+    "decision_severity", "decision_color", "decision_action",
+]
 
 
-def process_ppg_window(
-    raw: np.ndarray,
-    fs_hz: int,
-    motion_score: float
-) -> Dict[str, Any]:
-    """Process PPG window and return features."""
-    if len(raw) < fs_hz:
-        return {"hr_bpm": None, "sqi": 0.0, "notes": ["insufficient_data"]}
+class CsvFeatureLogger:
+    """Logs extracted features to a CSV file for each window."""
 
-    filtered = preprocess_ppg(raw, fs_hz)
-    peaks = detect_peaks(filtered, fs_hz)
-    hr_bpm = estimate_hr_bpm(peaks, fs_hz)
-    sqi = compute_ppg_sqi(raw, filtered, peaks, fs_hz)
+    def __init__(self, log_dir: str):
+        os.makedirs(log_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.filepath = os.path.join(log_dir, f"features_{ts}.csv")
+        self._file = open(self.filepath, "w", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._file, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        self._writer.writeheader()
+        self._file.flush()
+        print(f"[edge] CSV logging to: {self.filepath}")
 
-    notes: List[str] = []
-    if hr_bpm is None:
-        notes.append("insufficient_data")
-    elif hr_bpm < 40 or hr_bpm > 180:
-        notes.append("hr_out_of_range")
+    def log(self, features: Dict[str, Any]) -> None:
+        ecg = features.get("ecg", {})
+        ppg = features.get("ppg", {})
+        spo2 = features.get("spo2", {})
+        temp = features.get("temp_c", {})
+        motion = features.get("motion", {})
+        resp = features.get("respiration", {})
+        rules = features.get("rules", {})
+        ml = features.get("ml", {})
+        dec = features.get("decision", {})
 
-    if sqi < 0.5:
-        notes.append("low_sqi")
+        row = {
+            "timestamp": datetime.now().isoformat(),
+            "patient_id": features.get("patient_id", ""),
+            "window_start_ms": features.get("window_start_ms", ""),
+            "window_sec": features.get("window_sec", ""),
+            # ECG
+            "ecg_hr_mean": ecg.get("hr_mean", ""),
+            "ecg_hr_min": ecg.get("hr_min", ""),
+            "ecg_hr_max": ecg.get("hr_max", ""),
+            "ecg_hrv_sdnn": ecg.get("hrv_sdnn", ""),
+            "ecg_hrv_rmssd": ecg.get("hrv_rmssd", ""),
+            "ecg_qrs_duration_ms": ecg.get("qrs_duration_ms", ""),
+            "ecg_abnormal_beats": ecg.get("abnormal_beats", ""),
+            "ecg_sqi": ecg.get("sqi", ""),
+            # PPG
+            "ppg_pulse_rate": ppg.get("pulse_rate", ""),
+            "ppg_amplitude": ppg.get("amplitude", ""),
+            "ppg_ptt_ms": ppg.get("ptt_ms", ""),
+            "ppg_sqi": ppg.get("sqi", ""),
+            # SpO2
+            "spo2_mean": spo2.get("mean", ""),
+            "spo2_min": spo2.get("min", ""),
+            "spo2_desaturation_count": spo2.get("desaturation_count", ""),
+            # Temp
+            "temp_mean": temp.get("mean", ""),
+            "temp_variation": temp.get("variation", ""),
+            "temp_fever": temp.get("fever", ""),
+            # Motion
+            "motion_mvt_count": motion.get("mvt_count", ""),
+            "motion_immobility": motion.get("immobility", ""),
+            "motion_agitation_index": motion.get("agitation_index", ""),
+            "motion_score": motion.get("score", ""),
+            # Respiration
+            "resp_rate_bpm": resp.get("rate_bpm", ""),
+            "resp_amplitude": resp.get("amplitude", ""),
+            # Rules
+            "rules_triggered": ";".join(rules.get("triggered", [])),
+            "rules_severity": rules.get("severity", ""),
+            # ML
+            "ml_risk_score": ml.get("risk_score", ""),
+            "ml_event_class": ml.get("event_class", ""),
+            "ml_deterioration_prob": ml.get("deterioration_prob", ""),
+            # Decision
+            "decision_severity": dec.get("severity", ""),
+            "decision_color": dec.get("color", ""),
+            "decision_action": dec.get("action", ""),
+        }
+        self._writer.writerow(row)
+        self._file.flush()
 
-    if motion_score > 0.5:
-        notes.append("motion_artifact")
-        sqi = max(0.0, sqi - 0.3)  # PPG more affected by motion
-
-    return {
-        "hr_bpm": round(hr_bpm, 2) if hr_bpm is not None else None,
-        "sqi": round(sqi, 3),
-        "notes": notes
-    }
-
-
-def process_spo2_window(values: List[float], drop_state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """
-    Process SpO2 values in window.
-    drop_state tracks ongoing drop events.
-    Returns (features, events).
-    """
-    events: List[Dict[str, Any]] = []
-
-    if not values:
-        return {"mean": None, "min": None, "drops": 0}, events
-
-    mean_val = float(np.mean(values))
-    min_val = float(np.min(values))
-    drop_count = drop_state.get("drop_count", 0)
-
-    # Check for SpO2 drop (value < 93 for >= 10 seconds)
-    threshold = 93.0
-    below_threshold = [v for v in values if v < threshold]
-
-    if below_threshold:
-        # Accumulate time below threshold
-        drop_state["below_time_sec"] = drop_state.get("below_time_sec", 0) + len(values)
-        drop_state["min_value"] = min(drop_state.get("min_value", 100), min(below_threshold))
-
-        if drop_state["below_time_sec"] >= 10 and not drop_state.get("drop_reported", False):
-            # Report drop event
-            drop_count += 1
-            drop_state["drop_count"] = drop_count
-            drop_state["drop_reported"] = True
-
-            severity = Severity.LOW
-            if drop_state["min_value"] < 85:
-                severity = Severity.HIGH
-            elif drop_state["min_value"] < 90:
-                severity = Severity.MODERATE
-
-            events.append({
-                "type": EventType.SPO2_DROP,
-                "severity": severity,
-                "details": {
-                    "min_value": round(drop_state["min_value"], 1),
-                    "duration_sec": drop_state["below_time_sec"]
-                }
-            })
-    else:
-        # Reset drop tracking
-        drop_state["below_time_sec"] = 0
-        drop_state["min_value"] = 100
-        drop_state["drop_reported"] = False
-
-    return {
-        "mean": round(mean_val, 1),
-        "min": round(min_val, 1),
-        "drops": drop_count
-    }, events
-
-
-def process_temp_window(values: List[float]) -> Dict[str, Any]:
-    """Process temperature values in window."""
-    if not values:
-        return {"mean": None}
-
-    mean_val = float(np.mean(values))
-
-    # Sanity check
-    if mean_val < 30 or mean_val > 45:
-        return {"mean": None, "notes": ["out_of_range"]}
-
-    return {"mean": round(mean_val, 2)}
+    def close(self) -> None:
+        self._file.close()
 
 
 # =============================================================================
@@ -569,14 +366,15 @@ class PatientState:
 # =============================================================================
 
 class EdgePreprocessor:
-    """Multi-sensor edge preprocessor."""
+    """Multi-sensor Edge AI Gateway."""
 
     def __init__(
         self,
         mqtt_client: mqtt.Client,
         device_id: str,
         config: SensorConfig,
-        debug: bool = False
+        models_dir: str,
+        debug: bool = False,
     ):
         self.client = mqtt_client
         self.device_id = device_id
@@ -588,6 +386,15 @@ class EdgePreprocessor:
 
         self.input_topics = get_input_topics(device_id)
         self.output_topics = get_output_topics(device_id)
+
+        # Initialize ML inference engine
+        self.ml_engine = MLInferenceEngine(models_dir)
+
+        # CSV logger (set externally via set_csv_logger)
+        self.csv_logger: Optional[CsvFeatureLogger] = None
+
+    def set_csv_logger(self, logger: CsvFeatureLogger) -> None:
+        self.csv_logger = logger
 
     def get_or_create_patient(self, patient_id: str) -> PatientState:
         """Get or create patient state."""
@@ -634,19 +441,17 @@ class EdgePreprocessor:
             state.temp_buffer.add_sample(t_ms, value)
 
     def _try_process_window(self, state: PatientState) -> None:
-        """Try to process a complete window if enough data available."""
+        """Full pipeline: extract → rules → ML → decision → publish."""
         window_sec = self.config.window_sec
         ecg_window_samples = int(window_sec * state.ecg_buffer.fs_hz)
 
-        # Check if ECG has enough data (ECG is the primary timing reference)
         if not state.ecg_buffer.has_window(ecg_window_samples):
             return
 
-        # Extract ECG window
+        # --- a) Extract raw windows aligned to ECG timing ---
         ecg_raw, window_start_ms = state.ecg_buffer.extract_window(ecg_window_samples)
         window_end_ms = window_start_ms + int(window_sec * 1000)
 
-        # Extract other streams aligned to this window
         ppg_window_samples = int(window_sec * state.ppg_buffer.fs_hz)
         ppg_raw, _ = state.ppg_buffer.extract_window(ppg_window_samples)
 
@@ -656,25 +461,67 @@ class EdgePreprocessor:
         spo2_values = state.spo2_buffer.extract_window(window_start_ms, window_end_ms)
         temp_values = state.temp_buffer.extract_window(window_start_ms, window_end_ms)
 
-        # Process IMU first (needed for motion artifact detection)
-        motion_score, motion_notes = compute_motion_score(imu_raw)
+        # --- b+c) Feature extraction (all sensors) ---
+        motion_features = extract_motion_features(imu_raw, state.imu_buffer.fs_hz)
+        motion_score = motion_features["score"]
 
-        # Process each sensor
-        ecg_features = process_ecg_window(
-            ecg_raw, state.ecg_buffer.fs_hz, self.config.notch_hz, motion_score
+        ecg_features = extract_ecg_features(
+            ecg_raw, state.ecg_buffer.fs_hz,
+            notch_hz=self.config.notch_hz,
+            motion_score=motion_score,
         )
-        ppg_features = process_ppg_window(ppg_raw, state.ppg_buffer.fs_hz, motion_score)
-        spo2_features, spo2_events = process_spo2_window(spo2_values, state.spo2_drop_state)
-        temp_features = process_temp_window(temp_values)
-        motion_features = {"score": round(motion_score, 3), "notes": motion_notes}
+
+        # Get internal ECG peaks for PPG PTT calculation
+        ecg_peaks = ecg_features.pop("_peaks", np.array([], dtype=int))
+        ecg_filtered = ecg_features.pop("_filtered", np.array([], dtype=float))
+
+        ppg_features = extract_ppg_features(
+            ppg_raw, state.ppg_buffer.fs_hz,
+            motion_score=motion_score,
+            ecg_peaks=ecg_peaks,
+            ecg_fs=state.ecg_buffer.fs_hz,
+        )
+
+        spo2_features, spo2_raw_events = extract_spo2_features(
+            spo2_values, window_sec, state.spo2_drop_state,
+        )
+
+        temp_features = extract_temp_features(temp_values)
+
+        resp_features = extract_respiration_features(ecg_filtered, state.ecg_buffer.fs_hz)
 
         # Update last HR values
-        if ecg_features["hr_bpm"] is not None:
-            state.last_hr_ecg = ecg_features["hr_bpm"]
-        if ppg_features["hr_bpm"] is not None:
-            state.last_hr_ppg = ppg_features["hr_bpm"]
+        if ecg_features.get("hr_mean") is not None:
+            state.last_hr_ecg = ecg_features["hr_mean"]
+        if ppg_features.get("pulse_rate") is not None:
+            state.last_hr_ppg = ppg_features["pulse_rate"]
 
-        # Build features message
+        # --- d) Clinical rules engine ---
+        rules_result = evaluate_clinical_rules(
+            patient_id=state.patient_id,
+            t_ms=window_start_ms,
+            ecg_features=ecg_features,
+            ppg_features=ppg_features,
+            spo2_features=spo2_features,
+            temp_features=temp_features,
+            motion_features=motion_features,
+            respiration_features=resp_features,
+        )
+
+        # --- e) ML inference ---
+        ml_result = self.ml_engine.predict(
+            ecg=ecg_features,
+            ppg=ppg_features,
+            spo2=spo2_features,
+            temp=temp_features,
+            motion=motion_features,
+            respiration=resp_features,
+        )
+
+        # --- f) Decision engine ---
+        decision = make_decision(rules_result, ml_result)
+
+        # --- Build and publish features ---
         features = create_features(
             patient_id=state.patient_id,
             window_start_ms=window_start_ms,
@@ -683,75 +530,29 @@ class EdgePreprocessor:
             ppg=ppg_features,
             spo2=spo2_features,
             temp_c=temp_features,
-            motion=motion_features
+            motion=motion_features,
+            respiration=resp_features,
+            rules={"triggered": rules_result["triggered"], "severity": rules_result["severity"]},
+            ml=ml_result,
+            decision=decision,
         )
 
-        # Publish features
         self.client.publish(self.output_topics["features"], to_json(features), qos=1)
+
+        # Log to CSV file
+        if self.csv_logger:
+            self.csv_logger.log(features)
+
         print(f"[edge] patient={state.patient_id} window={window_start_ms} "
-              f"ecg_hr={ecg_features['hr_bpm']} ppg_hr={ppg_features['hr_bpm']} "
-              f"spo2={spo2_features['mean']} temp={temp_features.get('mean')} motion={motion_score:.2f}")
+              f"HR={ecg_features.get('hr_mean')} SpO2={spo2_features.get('mean')} "
+              f"Temp={temp_features.get('mean')} Motion={motion_score:.2f} "
+              f"ML_risk={ml_result.get('risk_score')} "
+              f"Decision={decision['color'].upper()} ({decision['action']})")
 
-        # Generate events
-        events: List[Dict[str, Any]] = []
-
-        # SpO2 events
-        for evt in spo2_events:
-            events.append(create_event(
-                patient_id=state.patient_id,
-                t_ms=window_start_ms,
-                event_type=evt["type"],
-                severity=evt["severity"],
-                details=evt["details"]
-            ))
-
-        # HR events (tachycardia/bradycardia)
-        hr_val = ecg_features["hr_bpm"] or ppg_features["hr_bpm"]
-        if hr_val is not None:
-            if hr_val > 100:
-                severity = Severity.HIGH if hr_val > 150 else Severity.MODERATE if hr_val > 120 else Severity.LOW
-                events.append(create_event(
-                    patient_id=state.patient_id,
-                    t_ms=window_start_ms,
-                    event_type=EventType.TACHYCARDIA,
-                    severity=severity,
-                    details={"hr_bpm": hr_val}
-                ))
-            elif hr_val < 50:
-                severity = Severity.HIGH if hr_val < 40 else Severity.MODERATE if hr_val < 45 else Severity.LOW
-                events.append(create_event(
-                    patient_id=state.patient_id,
-                    t_ms=window_start_ms,
-                    event_type=EventType.BRADYCARDIA,
-                    severity=severity,
-                    details={"hr_bpm": hr_val}
-                ))
-
-        # Low quality event
-        avg_sqi = (ecg_features["sqi"] + ppg_features["sqi"]) / 2
-        if avg_sqi < 0.4:
-            events.append(create_event(
-                patient_id=state.patient_id,
-                t_ms=window_start_ms,
-                event_type=EventType.LOW_QUALITY,
-                severity=Severity.MODERATE if avg_sqi < 0.2 else Severity.LOW,
-                details={"ecg_sqi": ecg_features["sqi"], "ppg_sqi": ppg_features["sqi"]}
-            ))
-
-        # Motion artifact event
-        if motion_score > 0.5:
-            events.append(create_event(
-                patient_id=state.patient_id,
-                t_ms=window_start_ms,
-                event_type=EventType.MOTION_ARTIFACT,
-                severity=Severity.HIGH if motion_score > 0.8 else Severity.MODERATE,
-                details={"motion_score": motion_score}
-            ))
-
-        # Publish events
-        for evt in events:
+        # --- Publish events (from rules engine) ---
+        for evt in rules_result.get("events", []):
             self.client.publish(self.output_topics["events"], to_json(evt), qos=1)
-            print(f"[edge] EVENT: {evt['type']} severity={evt['severity']} details={evt['details']}")
+            print(f"[edge] EVENT: {evt['type']} severity={evt['severity']} details={evt.get('details', {})}")
 
 
 def main() -> None:
@@ -764,18 +565,27 @@ def main() -> None:
     parser.add_argument("--window-sec", type=float, default=5.0)
     parser.add_argument("--notch-hz", type=float, default=50.0)
     parser.add_argument("--disable-notch", action="store_true")
+    parser.add_argument("--models-dir", default=None,
+                        help="Directory for ML model files (default: <project>/models)")
+    parser.add_argument("--log-dir", default=None,
+                        help="Directory for CSV feature logs (default: <project>/data/logs)")
+    parser.add_argument("--no-log", action="store_true",
+                        help="Disable CSV file logging")
     parser.add_argument("--debug", action="store_true")
 
-    # Legacy compatibility
-    parser.add_argument("--input-topic", default=None, help="(Deprecated) Use device-id instead")
-    parser.add_argument("--output-topic", default=None, help="(Deprecated) Use device-id instead")
-
     args = parser.parse_args()
+
+    # Resolve models directory
+    if args.models_dir:
+        models_dir = args.models_dir
+    else:
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
     # Print capabilities
     print(f"[edge] SciPy available: {SCIPY_AVAILABLE}")
     if not SCIPY_AVAILABLE:
         print("[edge] WARNING: Running without SciPy - using basic preprocessing only")
+    print(f"[edge] Models directory: {models_dir}")
 
     # Create configuration
     config = SensorConfig(
@@ -795,8 +605,18 @@ def main() -> None:
         mqtt_client=client,
         device_id=args.device_id,
         config=config,
-        debug=args.debug
+        models_dir=models_dir,
+        debug=args.debug,
     )
+
+    # Set up CSV feature logger
+    csv_logger = None
+    if not args.no_log:
+        log_dir = args.log_dir or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "logs"
+        )
+        csv_logger = CsvFeatureLogger(log_dir)
+        processor.set_csv_logger(csv_logger)
 
     def on_connect(c: mqtt.Client, _userdata, _connect_flags, reason_code, _properties):
         if reason_code == 0:
@@ -905,6 +725,9 @@ def main() -> None:
     finally:
         client.loop_stop()
         client.disconnect()
+        if csv_logger:
+            csv_logger.close()
+            print(f"[edge] Features saved to: {csv_logger.filepath}")
 
 
 if __name__ == "__main__":

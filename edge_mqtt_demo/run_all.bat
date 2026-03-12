@@ -68,15 +68,8 @@ for /L %%A in (1,1,2) do (
     >nul ping -n 2 127.0.0.1
 )
 
-echo [INFO] Launching Viewer (multi-sensor dashboard with plots)...
-start "Viewer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\viewer.py" --plot"
-
-for /L %%A in (1,1,2) do (
-    >nul ping -n 2 127.0.0.1
-)
-
-echo [INFO] Launching Visualizer (ECG waveform plots)...
-start "Visualizer" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\visualizer.py""
+echo [INFO] Launching Monitor (single-window dashboard with page navigation)...
+start "Monitor" /D "%PROJECT_DIR%" cmd /k ""%PY_EXE%" "%PROJECT_DIR%\src\visualizer.py""
 
 for /L %%A in (1,1,3) do (
     >nul ping -n 2 127.0.0.1
@@ -99,13 +92,11 @@ echo     - Subscribes to all sensor topics
 echo     - Processes 5-second windows
 echo     - Publishes: edge/patient1/features, edge/patient1/events
 echo.
-echo   VIEWER (Multi-Sensor Dashboard)
-echo     - Shows: ECG HR, PPG HR, SpO2, Temperature, Motion Score
-echo     - Displays events (tachycardia, bradycardia, spo2_drop, etc.)
-echo.
-echo   VISUALIZER (ECG Waveform)
-echo     - Raw vs Filtered ECG signals
-echo     - R-peak detection
+echo   MONITOR (Single-Window Dashboard — 3 pages)
+echo     - Page 1: Raw inputs (ECG, PPG, SpO2, Temperature, IMU)
+echo     - Page 2: Preprocessed signals (filtered + peaks, trends, motion)
+echo     - Page 3: AI features, ML predictions, clinical rules, decision
+echo     - Click buttons at bottom to switch pages
 echo.
 echo ============================================================================
 echo [INFO] Close windows or press Ctrl+C in each to stop services.
